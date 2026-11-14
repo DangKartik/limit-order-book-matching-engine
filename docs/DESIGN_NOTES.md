@@ -705,8 +705,9 @@ releasing and re-taking the lock, and the engine is single-threaded by design.
 ## Stage 4: market-making simulator
 
 Every number in this section comes from `python/run_analysis.py` (fixed seeds;
-the run quoted here took 76.6 s on this machine with 10 worker processes,
-recorded under `timings_seconds`) and is stored in `results/mm/summary.json`; the full printed report is
+the saved run took 95.2 s on this machine with 10 worker processes, recorded
+under `timings_seconds`; the timing is the only thing that changes between
+runs) and is stored in `results/mm/summary.json`; the full printed report is
 `results/mm/report.txt` and the figures are `results/mm/fig*.png`. Units
 throughout: prices in ticks, quantities in lots, P&L in ticks x lots. "s.e." is
 the standard error of a mean over episodes.
@@ -949,9 +950,8 @@ barely differ (13.26 vs 13.12 for std of profit).
 
 **Trade-off.** The time-varying version is kept: it isolates the inventory
 skew exactly, because both strategies quote the same spread at every instant.
-But its docstring calls it "the paper's benchmark", which is not quite right,
-and any write-up should say "same spread as the inventory strategy, centred on
-the mid".
+It is not the paper's benchmark, though, and its docstring and the README say
+so: "the same spread as the inventory strategy, centred on the mid".
 
 ### #30. Results: inventory strategy vs symmetric in the order-book simulator
 
