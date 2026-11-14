@@ -13,7 +13,6 @@
 
 namespace {
 
-using lob::OrderBook;
 using lob::OrderId;
 using lob::OrderResult;
 using lob::Price;
@@ -22,24 +21,27 @@ using lob::Side;
 using lob::Trade;
 using lob::testing::ReferenceBook;
 
-// TestWithParam runs the same test body once per seed listed at the bottom.
-class DifferentialTest : public ::testing::TestWithParam<std::uint64_t> {};
-
-TEST_P(DifferentialTest, EngineMatchesReferenceOnRandomStream) {
+// Runs one seeded random stream through `Book` and the reference book.
+// A function template so the same body checks every implementation.
+template <typename Book>
+void run_differential(std::uint64_t seed) {
     constexpr int kOperations = 20'000;
 
     // A fixed seed makes the "random" stream identical on every run, so a
     // failure is reproducible. mt19937_64 is the standard Mersenne Twister.
-    std::mt19937_64 rng(GetParam());
+    std::mt19937_64 rng(seed);
 
-    // Prices are drawn from a narrow band so buys and sells overlap often;
-    // a wide band would mostly produce orders that rest and never trade.
-    std::uniform_int_distribution<Price> price_dist(95, 105);
+    // The book accepts prices 90..110. Prices are drawn from a slightly wider
+    // band, so buys and sells overlap often (a wide band would mostly produce
+    // orders that rest and never trade), the edges of the range are hit, and a
+    // few orders fall outside it and must be rejected identically.
+    const lob::BookConfig config{.min_price = 90, .max_price = 110};
+    std::uniform_int_distribution<Price> price_dist(88, 112);
     std::uniform_int_distribution<Quantity> qty_dist(1, 20);
     std::uniform_int_distribution<int> percent(0, 99);
 
-    OrderBook book;
-    ReferenceBook reference;
+    Book book(config);
+    ReferenceBook reference(config);
     std::vector<Trade> book_trades;
     std::vector<Trade> ref_trades;
     OrderId last_id = 0;
@@ -48,7 +50,7 @@ TEST_P(DifferentialTest, EngineMatchesReferenceOnRandomStream) {
 
     for (int op = 0; op < kOperations; ++op) {
         // On failure, GoogleTest prints this so we know which operation diverged.
-        SCOPED_TRACE(::testing::Message() << "seed " << GetParam() << ", operation " << op);
+        SCOPED_TRACE(::testing::Message() << "seed " << seed << ", operation " << op);
 
         book_trades.clear();   // clear() keeps the capacity: no reallocation
         ref_trades.clear();
@@ -62,7 +64,9 @@ TEST_P(DifferentialTest, EngineMatchesReferenceOnRandomStream) {
             const OrderResult a = book.add_limit(side, price, qty, book_trades);
             const OrderResult b = reference.add_limit(side, price, qty, ref_trades);
             ASSERT_EQ(a, b);
-            last_id = a.id;
+            if (a.id != 0) {   // 0 means rejected (price out of range)
+                last_id = a.id;
+            }
         } else if (roll < 65) {   // 10%: market order
             const Quantity qty = qty_dist(rng);
             const OrderResult a = book.add_market(side, qty, book_trades);
@@ -106,6 +110,22 @@ TEST_P(DifferentialTest, EngineMatchesReferenceOnRandomStream) {
     EXPECT_GT(successful_cancels, 1000u);
 }
 
-INSTANTIATE_TEST_SUITE_P(Seeds, DifferentialTest, ::testing::Values(1u, 2u, 3u, 42u, 20261114u));
+template <typename Book>
+class DifferentialTest : public ::testing::Test {};
+
+using BookTypes =
+    ::testing::Types<lob::MapListBook, lob::MapPoolBook, lob::FlatListBook, lob::FlatPoolBook>;
+TYPED_TEST_SUITE(DifferentialTest, BookTypes);
+
+TYPED_TEST(DifferentialTest, EngineMatchesReferenceOnRandomStreams) {
+    for (const std::uint64_t seed : {1u, 2u, 3u, 42u, 20261114u}) {
+        run_differential<TypeParam>(seed);
+        // ASSERT_* only returns from the function it is in (run_differential),
+        // so check here whether it failed and stop instead of piling on errors.
+        if (::testing::Test::HasFatalFailure()) {
+            return;
+        }
+    }
+}
 
 }  // namespace

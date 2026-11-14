@@ -1,0 +1,55 @@
+cpu            : Apple M5
+compiler       : Apple LLVM 21.0.0 (clang-2100.1.1.101)
+build          : Release
+clock tick     : 41 ns (latency samples are multiples of this)
+clock call cost: 15.5 ns (two calls are inside every latency sample)
+measured ops   : 2000000 per scenario, throughput = median of 7 runs
+
+=== scenario: dense  (target depth 10000 orders, mean offset 10 ticks)
+    mix: 64.3% limit, 30.6% cancel, 5.0% market
+    result of every implementation: 767642 trades, 612782 cancels, 9999 orders left resting
+
+    implementation          M ops/s    ns/op |    p50    p90    p99   p99.9       max   (latency per op, ns)
+    map+list (baseline)       18.73     53.4 |     42     83    125     209     13917
+    map+pool                  22.51     44.4 |     42     83    125     167     14375
+    flat+list                 23.32     42.9 |     42     42    125     209     18958
+    flat+pool                 31.70     31.5 |     41     42     84     167     14084
+
+    by type (ns)         | limit p50/p99/p99.9 | cancel p50/p99/p99.9 | market p50/p99/p99.9
+    map+list (baseline)  |    42   125    167 |    42    84    167 |    83   250    333
+    map+pool             |    42    84    166 |    42    84    125 |    42   208    250
+    flat+list            |    42   125    167 |    42    84    125 |    83   250    292
+    flat+pool            |    41    84    125 |    41    42    125 |    42   167    250
+
+=== scenario: deep  (target depth 100000 orders, mean offset 50 ticks)
+    mix: 63.8% limit, 31.3% cancel, 5.0% market
+    result of every implementation: 742793 trades, 625358 cancels, 99991 orders left resting
+
+    implementation          M ops/s    ns/op |    p50    p90    p99   p99.9       max   (latency per op, ns)
+    map+list (baseline)       13.73     72.8 |     83     84    208     292     15250
+    map+pool                  16.36     61.1 |     42     84    167     250     14834
+    flat+list                 17.87     56.0 |     42     84    167     292     17000
+    flat+pool                 22.84     43.8 |     42     83    167     250     18000
+
+    by type (ns)         | limit p50/p99/p99.9 | cancel p50/p99/p99.9 | market p50/p99/p99.9
+    map+list (baseline)  |    42   167    250 |    83   167    291 |    84   333    458
+    map+pool             |    42   125    208 |    83   125    208 |    83   250    334
+    flat+list            |    42   167    250 |    42   125    209 |    83   333    417
+    flat+pool            |    42   125    209 |    42   167    250 |    83   250    375
+
+=== scenario: sparse  (target depth 2000 orders, mean offset 1000 ticks)
+    mix: 54.0% limit, 41.0% cancel, 5.0% market
+    result of every implementation: 358750 trades, 819294 cancels, 1999 orders left resting
+
+    implementation          M ops/s    ns/op |    p50    p90    p99   p99.9       max   (latency per op, ns)
+    map+list (baseline)       13.24     75.5 |     83     84    167     292     14375
+    map+pool                  14.35     69.7 |     42     84    166     250     15084
+    flat+list                 26.77     37.4 |     41     42    166     250     15084
+    flat+pool                 34.42     29.1 |     41     42    125     167     14292
+
+    by type (ns)         | limit p50/p99/p99.9 | cancel p50/p99/p99.9 | market p50/p99/p99.9
+    map+list (baseline)  |    42   125    167 |    83   125    208 |    84   333    417
+    map+pool             |    42   125    167 |    83   125    208 |    83   250    333
+    flat+list            |    41    84    125 |    42    83    125 |    83   250    333
+    flat+pool            |    41    83    125 |    41    42    125 |    42   208    250
+

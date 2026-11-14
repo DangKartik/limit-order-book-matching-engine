@@ -16,6 +16,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(LOB_BUILD_TESTS "Build the unit tests" ON)
+option(LOB_BUILD_BENCH "Build the benchmark harness" ON)
 option(LOB_SANITIZE "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 
 # Sanitizers instrument the code to catch memory errors (use-after-free,
@@ -33,13 +34,18 @@ endif()
 add_library(lob_warnings INTERFACE)
 target_compile_options(lob_warnings INTERFACE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
 
-# The engine: a static library with no I/O. Tests, benchmarks and (later) the
-# Python bindings all link against this one target.
-add_library(lob STATIC src/order_book.cpp)
-target_include_directories(lob PUBLIC include)
-target_link_libraries(lob PRIVATE lob_warnings)
+# The engine: a header-only library with no I/O (it is a class template, so its
+# code lives in headers; see include/lob/order_book.hpp). An INTERFACE target
+# compiles nothing itself; it just tells anything that links to it where the
+# headers are. Tests, benchmarks and the Python bindings all link to this target.
+add_library(lob INTERFACE)
+target_include_directories(lob INTERFACE include)
 
 if(LOB_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(LOB_BUILD_BENCH)
+  add_subdirectory(bench)
 endif()

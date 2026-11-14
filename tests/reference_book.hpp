@@ -19,8 +19,10 @@ namespace lob::testing {
 
 class ReferenceBook {
 public:
+    explicit ReferenceBook(BookConfig config = {}) : config_(config) {}
+
     OrderResult add_limit(Side side, Price price, Quantity qty, std::vector<Trade>& trades) {
-        if (price <= 0) {
+        if (price < config_.min_price || price > config_.max_price) {
             return OrderResult{.reject = RejectReason::InvalidPrice};
         }
         return submit(side, price, qty, /*is_market=*/false, trades);
@@ -150,6 +152,7 @@ private:
         orders_.erase(orders_.begin() + static_cast<std::ptrdiff_t>(i));
     }
 
+    BookConfig config_;
     std::vector<RefOrder> orders_;
     OrderId next_id_ = 1;
 };

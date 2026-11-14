@@ -5,9 +5,10 @@ and what the trade-off is. Entries are numbered so code comments can refer to
 them (`See DESIGN_NOTES #4`). Part A is a C++ primer for someone coming from
 Python and Java; Part B is the decisions.
 
-No performance numbers appear in this file until stage 2 measures them. Where a
-note says something is "slow" or "fast", it is a claim about complexity or memory
-layout, to be tested by the benchmarks, not a measured result.
+Entries #1 to #14 were written in stage 1, before anything was measured: where
+they say something is "slow" or "fast" it is a claim about complexity or memory
+layout. Entries #15 onwards (stage 2) test those claims; every number there
+comes from a Release build run on this machine and is saved in `results/`.
 
 ---
 
@@ -71,10 +72,10 @@ the order rests, no matter how many other orders are added or removed around it.
 
 Places in the code where invalidation is handled deliberately:
 
-- `match()`: `index_.erase(maker.id)` is called **before** `level.orders.pop_front()`,
+- `match()`: `index_.erase(maker.id)` is called **before** `level.queue.pop_front()`,
   because the pop destroys the `Order` that `maker` refers to.
-- `match()`: after `opposite.erase(level_it)`, neither `level_it` nor `level` is
-  touched again; the loop re-reads `begin()`.
+- `match()`: after `opposite.erase(cursor)`, neither `cursor` nor `level` is
+  touched again; the loop re-reads `best()`.
 - `cancel()`: `side` is copied out of the order before `remove_resting()` erases it.
 
 ### A4. Move semantics
@@ -97,12 +98,11 @@ Java generics are erased at runtime: one compiled `List` handles every element
 type through references. C++ templates are *instantiated*: the compiler
 generates a separate, fully specialised copy of the code for each type used.
 
-`match<SideMap>()` is compiled twice, once for the bid map and once for the ask
-map. Each copy calls that map's comparator directly, so it can be inlined; there
-is no virtual dispatch. The cost is larger binaries and the usual rule that a
-template's definition must be visible where it is used. The private templates
-here are declared in the header and defined in `order_book.cpp`, which works
-only because every use is inside that same file.
+`match<Levels>()` is compiled twice per book type, once for the bid side and
+once for the ask side. Each copy calls that side's code directly, so it can be
+inlined; there is no virtual dispatch. The cost is larger binaries and the rule
+that a template's definition must be visible where it is used, which is why the
+engine is header-only from stage 2 on (see #15).
 
 ### A6. `const` member functions
 
@@ -155,9 +155,9 @@ The cost is losing one bit of range, which is irrelevant at 64 bits.
 
 ### #3. Price levels: `std::map<Price, Level>` (baseline)
 
-**Choice.** Each side is a `std::map` (a red-black tree) keyed by price. Bids use
-`std::greater<Price>` so the map sorts descending; asks use the default
-ascending order. On both sides `begin()` is the best price.
+**Choice.** Each side is a `std::map` (a red-black tree) keyed by price, ordered
+by a small comparator, `BetterPrice<kSide>`, that sorts bids descending and asks
+ascending. On both sides `begin()` is the best price.
 
 **Alternatives.**
 - A sorted `std::vector` of levels: contiguous memory and fast iteration, but
@@ -325,8 +325,10 @@ orders.
 
 ### #12. Input validation and what is not validated
 
-**Choice.** `qty <= 0` and limit `price <= 0` are rejected with a reason code in
-the result. Nothing throws.
+**Choice.** `qty <= 0` and a limit price outside the book's configured range
+(`BookConfig`, by default 1 to 100,000 ticks) are rejected with a reason code in
+the result. No order-entry call throws. The only exception in the engine is
+`std::invalid_argument` from the constructor for an impossible price range.
 
 **Alternatives.** Throw exceptions; use asserts only; return `std::expected`
 (which is C++23, not C++20).
@@ -350,6 +352,9 @@ one rule per test. `differential_test.cpp` drives the engine and a deliberately
 naive `ReferenceBook` with the same seeded random stream (20,000 operations for
 each of 5 seeds) and requires identical results, trades, best prices and order
 counts after every operation, plus identical full depth every 100 operations.
+From stage 2, both layers are typed tests that run against all four book
+implementations (#15), and `order_pool_test.cpp` tests the pool and intrusive
+queue directly.
 
 **Alternatives.** Scenario tests only; or property-based testing with a library.
 
@@ -377,3 +382,251 @@ apply to our code and not to GoogleTest. Defaulting to Release prevents the most
 common benchmarking mistake, which is timing an unoptimised build. FetchContent
 needs network access on the first configure, in exchange for not requiring a
 system-wide install.
+
+---
+
+## Stage 2: selectable implementations and benchmarks
+
+### #15. One matching engine, four data-structure combinations, chosen at compile time
+
+**Choice.** The book is a class template,
+`BasicOrderBook<Queue, LevelsT>`. `Queue` is `ListQueue` or `IntrusiveQueue`;
+`LevelsT` is `MapLevels` or `FlatLevels`. Four aliases name the combinations:
+`MapListBook` (the stage 1 baseline), `MapPoolBook`, `FlatListBook`,
+`FlatPoolBook`. The matching logic exists once.
+
+**Alternatives.**
+- Two unrelated classes, baseline and optimised: simple, but the matching code
+  is duplicated, the copies can drift, and only "both optimisations together"
+  can be measured.
+- A common base class with virtual functions, chosen at runtime: the Java way.
+  Every queue and level operation becomes an indirect call that cannot be
+  inlined, which adds a cost to exactly the thing being measured.
+- `#ifdef` switches: one variant per build, so the variants cannot be tested
+  against each other in one binary.
+
+**Trade-off.** Templates give *static polymorphism*: the compiler generates four
+separate, fully inlined engines, so the abstraction costs nothing at runtime and
+a 2x2 experiment can attribute a speed-up to one data structure. The costs are
+real: the code is harder to read than stage 1's, error messages are worse, the
+two policies must agree on an interface that nothing but compilation checks
+(C++20 `concept`s could state it explicitly; not done here), and the engine has
+to be header-only because a template's body must be visible where it is used.
+
+C++ features this introduces:
+- **Template template parameter** (`template <typename, Side> class LevelsT`):
+  the argument is a template, not a type. The book instantiates it twice, as
+  `LevelsT<Queue, Side::Buy>` and `LevelsT<Queue, Side::Sell>`.
+- **Non-type template parameter** (`Side kSide`): a compile-time value. The bid
+  and ask containers are different types with the price ordering baked in.
+- **`if constexpr`**: a branch resolved at compile time; the untaken side is
+  not even compiled into that instantiation.
+- **Cursor**: each level container defines its own cheap "pointer to a level"
+  (a map iterator, or an array index). The book fetches a cursor once and reuses
+  it, so the map version does exactly one tree lookup per operation, the same as
+  the stage 1 code. Without this the refactor would have quietly slowed the
+  baseline and flattered the optimisations.
+
+### #16. Queue optimisation: intrusive doubly linked list over an object pool
+
+**Choice.** `IntrusiveQueue` links `OrderNode`s (an `Order` plus `prev`/`next`
+pointers) that come from an `OrderPool`. The pool allocates nodes in chunks of
+4,096 and keeps freed nodes on a LIFO free list for reuse.
+
+**Alternatives.**
+- `std::list` with a pooling allocator (`std::pmr::list` over a
+  `std::pmr::unsynchronized_pool_resource`): less code, but the node layout and
+  reuse policy stay hidden inside the library.
+- A pool that is one `std::vector<OrderNode>` with 32-bit indices instead of
+  pointers: smaller links, but growing the vector moves every node, which is a
+  latency spike, and every access needs the pool to turn an index into an address.
+- Never freeing: a bump allocator. Fastest, but memory grows without bound.
+
+**Trade-off.** What the pool removes is the call into the general-purpose
+allocator (`malloc`/`free`) on every order added and removed. `malloc` has to
+handle any size from any thread; the pool handles one size from one thread, so
+allocate and release are each a couple of pointer moves. Nodes from the same
+chunk are adjacent in memory, and the LIFO free list hands back the most
+recently touched node, which is likely still in cache. Chunks are owned by
+`std::unique_ptr<OrderNode[]>`, so node addresses never change (growing the
+vector of chunks moves only the owning pointers) and everything is freed by RAII
+when the book is destroyed.
+
+The costs: about 100 lines of hand-written pointer code where a bug is memory
+corruption rather than an exception (hence `order_pool_test.cpp` and the
+sanitizer build); memory is never returned to the system while the book lives,
+so the pool stays at its high-water mark; and after heavy churn the free list
+order is effectively random, so neighbours in a queue are not neighbours in
+memory. The cancel index is still a `std::unordered_map`, which does its own
+heap allocation per order, so this removes one of the two allocations per
+resting order, not both.
+
+### #17. Level optimisation: flat array indexed by tick
+
+**Choice.** `FlatLevels` is a `std::vector<Level>` with one permanent slot for
+every tick in `[min_price, max_price]`. It tracks the index of the best
+non-empty level and a count of non-empty levels.
+
+**Alternatives.**
+- Keep the map but pool its nodes: removes the allocations, keeps the
+  O(log L) pointer-chasing lookup.
+- A sorted `std::vector` of only the non-empty levels: compact, but inserting a
+  new level shifts the ones after it.
+- The flat array plus a bitmap of non-empty slots, so the next best level is
+  found with a count-trailing-zeros instruction instead of a slot-by-slot scan.
+  This is the natural next step if the scan ever showed up in a profile.
+
+**Trade-off.** Finding a level becomes `levels_[price - min_price]`: one
+subtraction and one index, no tree walk, no comparisons, and no allocation when
+a level appears or disappears. The costs:
+- **Memory**: a slot for every tick whether used or not. A `Level` is 32 bytes
+  here, so the benchmark range of 20,000 ticks costs 640 KB per side and the
+  default 100,000-tick range costs 3.2 MB per side.
+- **A bounded price range** fixed at construction. A real venue has price bands
+  too, but if the price leaves the range the book cannot follow it. This is why
+  `BookConfig` exists and why all four books enforce the same range.
+- **The scan**: when the best level empties, the next one is found by walking
+  slot by slot towards worse prices, which is O(gap in ticks); the map does it
+  in O(1). I expected this to make the flat array lose on a sparse book. It did
+  not (see #20), and that entry says why I think so.
+
+### #18. A hand-written benchmark harness
+
+**Choice.** `bench/bench_main.cpp` replays a pre-generated stream and does its
+own timing. It makes two kinds of pass: a *throughput* pass with one timestamp
+at each end, and a *latency* pass with a timestamp around every operation, from
+which it sorts the samples and reads off percentiles by nearest rank.
+
+**Alternatives.** Google Benchmark, which is the standard tool and handles
+warm-up, repetition and statistics well.
+
+**Trade-off.** Google Benchmark reports the mean time of a loop. A matching
+engine is judged on its tail: the p99 and p99.9, where the slow operations are.
+Seeing the tail needs a sample per operation and a replay of a specific stateful
+stream, both of which fit awkwardly in that framework. Writing the harness also
+means I can explain every number it prints. The price is that I own its
+mistakes, so the harness is built to distrust itself:
+- **The stream is generated once, outside any timed region**, and every
+  implementation replays the same operations.
+- **A checksum** (trade count, filled quantity, successful cancels, final order
+  count) must be identical for all four implementations or the run aborts.
+- **Runs are interleaved** (A B C D, A B C D, ...), not grouped, so thermal
+  drift on a fanless laptop is spread over all implementations.
+- **Throughput is the median of 7 runs**, with the minimum and maximum saved to
+  the CSV so the spread is visible. In the saved run the spread within any one
+  implementation was under 2%.
+- **It measures its own clock** and prints the result. See the limits below.
+- **It warns loudly if it is not a Release build.**
+
+**Measurement limits, which apply to every latency number.**
+- The clock on this machine ticks every **41.67 ns** (Apple Silicon's timer runs
+  at 24 MHz). Every latency sample is therefore a multiple of about 42 ns: the
+  values 41, 42, 83, 84, 125 in the tables are 1, 2 and 3 ticks, and the 1 ns
+  wobble is rounding. Two implementations that both show "p50 = 42" may differ
+  by a lot underneath. A typical operation here takes 30 to 75 ns, which is
+  about one tick, so **the p50 column cannot rank the implementations; only the
+  throughput-derived ns/op can.** The tail columns are coarse but meaningful.
+- Each latency sample includes two clock reads, measured at about 15 to 24 ns
+  per read across runs. The reads are not subtracted.
+- The `max` column is a single worst sample out of 2,000,000 and mostly reflects
+  the operating system (an interrupt or a context switch), not the book. It is
+  about 14 to 19 microseconds for every implementation. Treat it as noise.
+- macOS cannot pin a thread to a core. The harness requests the
+  user-interactive QoS class, which prefers the performance cores, but that is a
+  hint.
+- Single machine, single compiler, synthetic flow.
+
+### #19. The synthetic order stream
+
+**Choice.** A mid price follows a slow random walk (one tick on about 2% of
+operations). Limit orders arrive on both sides at a geometrically distributed
+distance from the mid, with 10% priced through the mid so that they trade.
+Cancels pick a live resting order uniformly at random. 5% of operations are
+market orders. A simple controller leans towards adding orders when the book is
+below its target depth and towards cancelling when above. Three scenarios vary
+the shape of the book:
+
+| Scenario | Resting orders | Mean distance from mid | Purpose |
+|---|---|---|---|
+| dense | 10,000 | 10 ticks | many orders on few levels |
+| deep | 100,000 | 50 ticks | a large book that does not fit in the fast caches |
+| sparse | 2,000 | 1,000 ticks | few orders on many far-apart levels: intended as the flat array's worst case |
+
+**Alternatives.** Replaying real exchange data (for example Nasdaq ITCH), which
+would be more convincing but needs a data licence or a large download and a
+parser. Or a uniform random stream, which is easy but keeps the book either
+empty or permanently crossed.
+
+**Trade-off.** The stream is reproducible and its shape is controllable, which
+is what a before/after comparison needs. It is not realistic: real flow is
+bursty, cancels cluster near the best price, and order sizes are not uniform.
+The mix that results (about 64% limit, 31% cancel, 5% market in the dense and
+deep scenarios; 54/41/5 in sparse) is printed by the harness. It has a far
+higher trade rate than a real market, where well over 90% of orders are
+cancelled without trading. The results say how these data structures behave on
+this stream, not how fast the engine would be on a real feed.
+
+My first version of the controller was too weak: the dense book drained from
+10,000 orders to 58 during the run, so it was benchmarking a nearly empty book.
+The harness prints the final resting order count for exactly this reason.
+
+### #20. Results
+
+Release build (`-O3 -DNDEBUG`), Apple M5 MacBook Air, Apple clang 21,
+2,000,000 measured operations per scenario, median of 7 runs. Raw output:
+`results/bench_stage2.txt` and `results/bench_stage2.csv`.
+
+Throughput in million operations per second (ns per operation in brackets):
+
+| Scenario | map+list (baseline) | map+pool | flat+list | flat+pool | Speed-up, both |
+|---|---|---|---|---|---|
+| dense | 18.7 (53.4) | 22.5 (44.4) | 23.3 (42.9) | 31.7 (31.5) | 1.69x |
+| deep | 13.7 (72.8) | 16.4 (61.1) | 17.9 (56.0) | 22.8 (43.8) | 1.66x |
+| sparse | 13.2 (75.5) | 14.4 (69.7) | 26.8 (37.4) | 34.4 (29.1) | 2.60x |
+
+Latency over all operations, in ns (multiples of the 42 ns clock tick):
+
+| Scenario | Implementation | p50 | p99 | p99.9 |
+|---|---|---|---|---|
+| dense | map+list | 42 | 125 | 209 |
+| dense | flat+pool | 41 | 84 | 167 |
+| deep | map+list | 83 | 208 | 292 |
+| deep | flat+pool | 42 | 167 | 250 |
+| sparse | map+list | 83 | 167 | 292 |
+| sparse | flat+pool | 41 | 125 | 167 |
+
+What the numbers show:
+- **Both optimisations help in every scenario, and they combine.** In dense, the
+  pool alone gives 1.20x and the flat array alone 1.25x; together 1.69x, which
+  is more than the product of the two (1.50x).
+- **The flat array matters most when there are many levels.** In sparse, it
+  alone gives 2.02x, because the map there holds on the order of a thousand
+  levels per side and every add and cancel walks about ten tree nodes. In dense,
+  the map is small and its top nodes stay in cache, so the gain is 1.25x.
+- **The pool's gain is steadier**: 1.08x to 1.20x alone, 1.28x to 1.36x on top of
+  the flat array. It is larger once the tree is gone because a fixed saving is
+  a bigger share of a shorter operation.
+- **A bigger book is slower for everyone.** Baseline goes from 53 to 73 ns per
+  operation between dense and deep. The data no longer fits in the fast caches,
+  and the hash map lookup for cancel, which all four share, misses more often.
+- **The tail improves by about one clock tick**, for example p99.9 from 209 to
+  167 ns in dense and 292 to 167 ns in sparse. The clock cannot resolve more.
+
+What surprised me: I expected the flat array to lose in the sparse scenario
+because of its scan for the next best level. It won by its largest margin
+there. I have not profiled it, so this is reasoning, not measurement: the scan
+runs only when the best level empties; it reads memory sequentially, which the
+hardware prefetcher handles well; and with orders concentrated near the mid, the
+next occupied slot is usually close even in this scenario. The map, meanwhile,
+pays its tree walk on every add and cancel.
+A workload that emptied the best level on most operations with gaps of many
+thousands of ticks would reverse this, and the bitmap in #17 is the fix.
+
+What this does not show: no profiler or hardware counters were used, so the
+explanations above about caches and allocators are the standard account and
+consistent with the numbers, but not directly observed. The remaining shared
+cost is the `std::unordered_map` cancel index; replacing it (for example with a
+vector indexed by order id) is the obvious next optimisation and is not done.
+
+`OrderBook` remains an alias for the baseline. The Python bindings in stage 3
+use `FlatPoolBook`, the fastest measured.

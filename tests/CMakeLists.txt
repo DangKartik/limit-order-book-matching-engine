@@ -18,6 +18,7 @@ FetchContent_MakeAvailable(googletest)
 add_executable(lob_tests
   order_book_test.cpp
   differential_test.cpp
+  order_pool_test.cpp
 )
 target_link_libraries(lob_tests PRIVATE lob lob_warnings GTest::gtest_main)
 

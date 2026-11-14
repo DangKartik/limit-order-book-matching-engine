@@ -41,7 +41,15 @@ struct Trade {
 enum class RejectReason : std::uint8_t {
     None,
     InvalidQuantity,   // qty <= 0
-    InvalidPrice,      // limit price <= 0
+    InvalidPrice,      // limit price outside [BookConfig::min_price, BookConfig::max_price]
+};
+
+// The range of limit prices a book accepts. Every implementation enforces it,
+// so they all behave identically; the flat-array book also uses it to size its
+// array (one slot per tick, so keep the range realistic). See DESIGN_NOTES #17.
+struct BookConfig {
+    Price min_price = 1;
+    Price max_price = 100'000;
 };
 
 // What happened to an order submitted to the book.
