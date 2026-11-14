@@ -699,3 +699,503 @@ belongs in C++.
 The GIL (Python's global interpreter lock) is held for the whole of every call.
 Releasing it would be pointless: each call is far shorter than the cost of
 releasing and re-taking the lock, and the engine is single-threaded by design.
+
+---
+
+## Stage 4: market-making simulator
+
+Every number in this section comes from `python/run_analysis.py` (fixed seeds;
+the run quoted here took 76.6 s on this machine with 10 worker processes,
+recorded under `timings_seconds`) and is stored in `results/mm/summary.json`; the full printed report is
+`results/mm/report.txt` and the figures are `results/mm/fig*.png`. Units
+throughout: prices in ticks, quantities in lots, P&L in ticks x lots. "s.e." is
+the standard error of a mean over episodes.
+
+### #23. An exogenous tape and common random numbers
+
+**Choice.** `mm/flow.py` draws every background order of an episode up front
+from one seed: arrival steps, sides, prices, sizes and cancellation times. The
+tape does not depend on the book or on any strategy. `mm/simulate.py` replays
+it through a fresh `pylob.OrderBook`, and the market maker's orders are added
+to the same book. Two strategies run on the same seed therefore receive
+exactly the same incoming orders; only the matching outcomes differ.
+
+**Alternatives.**
+- Reactive background traders that look at the book (for example, limit
+  orders placed relative to the current best bid). More realistic, but then the
+  flow depends on the market maker's quotes and two strategies no longer face
+  the same market.
+- Independent seeds per strategy. Simpler, but the comparison then carries the
+  full episode-to-episode noise.
+
+**Trade-off.** Common random numbers make the strategy comparison much
+sharper. In #30 the symmetric strategy's P&L has a std of 790.9 across tapes,
+while the per-tape difference between the two strategies has a std of 757.5:
+the inventory strategy's own P&L is so stable (std 173.4) that most of the
+difference is the symmetric strategy's luck, but the pairing still guarantees
+that both saw identical flow. The cost is that the background never reacts to
+the market maker. A cancelled order whose price the market maker has improved
+is still cancelled on schedule, and no background trader ever reacts to the
+market maker's quotes (#33).
+
+### #24. Background orders are priced off a hidden fundamental
+
+**Choice.** A fundamental price follows a Gaussian random walk (default std
+0.4 ticks per step). Background limit orders are priced a geometrically
+distributed number of ticks (mean 8) either side of the rounded fundamental.
+Market orders arrive at 0.4 per step with a random side and a size uniform on
+1..10. The market maker never sees the fundamental; it sees only the book.
+
+**Alternatives.** Price limit orders relative to the book mid (then the book
+has no anchor and the "true price" is undefined), or script adverse selection
+directly (for example, make some market orders informed about the next move).
+
+**Trade-off.** Anchoring to the fundamental gives a definite notion of value
+to mark against (#27) and makes adverse selection emerge from matching rather
+than from a rule: when the fundamental moves, new limit orders are priced
+through quotes that are now stale and trade against them. Market orders,
+by contrast, carry no information at all: their side is a coin flip. #31
+shows that this split decides whether the market maker makes money. The
+fundamental's increments are independent of everything that happened before,
+which has a useful consequence: the inventory P&L marked at the fundamental has
+zero expectation exactly, since inventory at the end of step s - 1 is
+independent of the fundamental's move in step s.
+
+The resulting background spread, measured while the market maker runs and
+excluding its own orders, averages 2.921 ticks (s.e. 0.004) in the inventory
+strategy's episodes and 2.875 (s.e. 0.003) in the symmetric strategy's.
+
+### #25. How the market maker quotes
+
+**Choice.** At the end of each step the market maker computes the model's bid
+and ask around the mid of the *background* touch (the best prices of everyone
+except itself), then:
+1. rounds outwards (`floor` for the bid, `ceil` for the ask), so it never quotes
+   tighter than the model asks for;
+2. clamps each quote to stay passive (a bid at most one tick below the
+   background best ask, and vice versa), so it is always the maker and never
+   pays the spread;
+3. leaves a quote alone if its target price is unchanged, even if partly filled,
+   to keep its place in the queue at that price;
+4. otherwise cancels and reposts. The new quotes first meet the next step's
+   flow, which is priced off a fundamental that has already moved: a one-step
+   reaction lag.
+
+**Alternatives.** Quoting around the full-book mid (the market maker would then
+chase its own orders once it is the best price); rounding to the nearest tick
+(tighter, more fills, less edge per fill); allowing aggressive quotes that
+cross the spread to dump inventory; requoting every order every step (simpler,
+but always at the back of the queue).
+
+**Trade-off.** Each choice is conservative and each costs fills. Outward
+rounding makes the realised spread wider than the model's: the model asks for
+2.9684 ticks at t = 0 and 2.8184 at t = T, but the inventory strategy's average
+quoted spread is 3.872 ticks and the symmetric strategy's 3.481. A plausible
+reading, consistent with these numbers but not separately tested: the symmetric
+strategy is centred on a mid that is always a whole or half tick, so its
+rounded quotes land on only a few distances, while the inventory skew moves the
+centre to arbitrary fractions, and outward rounding of an arbitrary fraction
+adds about one tick to the spread on average. Both are wider than the
+background spread (#24), so the market maker often joins the background best
+price rather than improving it, and then waits behind earlier orders. The
+one-step lag is the whole latency model; there is no notion of being faster or
+slower than anyone else.
+
+### #26. Units and mapping the model's parameters onto steps and ticks
+
+**Choice.** Time in the quoting formulas is measured in episodes (T = 1); a
+quote posted at the end of measured step i has `time_left = (n - 1 - i) / n`,
+so the last quote of the episode has zero time left and never trades. The
+model's volatility is the fundamental's std over one episode,
+`sigma = 0.4 * sqrt(2000) = 17.8885` ticks per square-root episode. The fill
+curve is calibrated per step and per tick (#28), and k = 0.7094 per tick is
+used directly. A (the fill intensity) does not appear in the quoting formulas
+at all; it only matters for the pure-model comparison in #32, where the model
+is run in step units instead (dt = 1 step, 2000 steps, sigma = 0.4 per step,
+A per step). gamma times sigma squared times time is the same number in either
+unit system, so gamma carries over unchanged.
+
+gamma is chosen by a stated rule rather than tuned: holding one quote's worth
+of inventory (5 lots) at the start of the episode shifts the reservation price
+by 0.75 ticks, `5 * gamma * sigma^2 * 1 = 0.75`, which gives
+gamma = 0.00046875 per tick per lot.
+
+**Alternatives.** Time in steps throughout (then sigma would be 0.4 and T 2000;
+equivalent, but the spread term is less obviously "per episode"); a gamma
+taken from the paper (gamma has units of 1 / (tick x lot) and multiplies
+sigma squared, so a value chosen for the paper's sigma = 2 means something
+entirely different when sigma over an episode is 17.8885 ticks).
+
+**Trade-off.** The skew rule is easy to state and to reason about in ticks,
+but it is a choice, not an optimum; #33 sweeps it over two orders of
+magnitude. Two small mismatches with the pure model are deliberate and
+documented rather than fixed: the pure model's `time_left` at step i is
+`(n - i)` steps, one step more than the book's, and its quotes are continuous
+rather than rounded.
+
+The market maker is given the true sigma. A real one would have to estimate
+it, with error.
+
+### #27. Mark-to-market and the exact P&L attribution
+
+**Choice.** P&L is `cash + inventory * mid`, with the background mid as the
+mark. Its change over a step splits exactly into
+- *inventory P&L*: inventory carried in from the previous step times the move
+  in the mid, and
+- *spread P&L*: for each fill in the step, its edge against the step's closing
+  mid, times its quantity.
+Cash is an integer and every term is a multiple of 0.5, so in float64 the
+identity holds with no rounding, and a test checks it bit for bit.
+`mm/analysis.py` computes the same split against any price path, in
+particular against the hidden fundamental.
+
+**Alternatives.** Mark at the last trade price, or at the market maker's own
+quote mid; attribute by round trips (FIFO matching of buys and sells).
+
+**Trade-off.** Marking at the book mid is what a real desk could do, and the
+identity makes every tick of P&L traceable. But the split is only as
+meaningful as the mark. In this simulator the book mid is pushed around by the
+very orders that trade with the market maker, so "inventory P&L" against the
+mid partly measures how the mid moved *because of* those orders. #31 shows
+that at the default volatility the mid-marked inventory P&L is positive
+(146.4, s.e. 3.6, for the inventory strategy) while marked at the fundamental
+it is zero within noise (-3.0, s.e. 3.5), and that at high volatility the mid
+marking books adverse selection as inventory losses.
+
+### #28. Calibrating the fill curve, and what the calibration ignores
+
+**Choice.** With no market maker in the book, for every step and side the
+simulator records how far from the start-of-step mid aggressive flow reached
+(`reach_buy`, `reach_sell`). For a grid of distances delta, the per-step
+probability that a quote at delta would have been reached is the fraction of
+side-steps with reach >= delta, counting steps with no aggressive order (NaN)
+as not reached. A straight line is fitted to log(probability) against delta
+over delta in [1, 3] ticks, the range in which the market maker actually
+quotes. 200 calibration episodes (seeds 10000 to 10199, disjoint from every
+evaluation seed) give 800,000 side-steps, of which 0.2017 saw aggressive flow.
+
+Result: A = 0.3734 per step and k = 0.7094 per tick, R^2 = 0.9866, largest
+absolute log residual 0.073 within the fit range.
+
+The curve is not a single exponential. The local slope between grid points
+rises from 0.298 per tick (0.5 to 1 tick) to about 1 (for example 1.010
+between 3.5 and 4), and the tail fit over [3, 8] gives k = 1.0019 with
+R^2 = 0.9999. The flattening near the touch is expected: a quote inside the
+background spread is reached by almost any aggressive order, so probability
+stops growing as the quote moves closer.
+
+**What the estimate ignores.**
+- *Queue position.* "Reached" means aggressive flow traded at or beyond that
+  price; a real quote there might have had other orders ahead of it.
+- *The market maker's own effect.* With the market maker in the book, its
+  quotes change which orders cross and where the mid is.
+- *Half-tick mids.* Distances are multiples of 0.5 because the mid is a whole
+  or half tick; whole and half distances come from books with different spread
+  parity and are pooled.
+- *Most steps have no reach.* Only 0.2017 of side-steps saw any aggressive
+  order; the rest are NaN and count as "not reached", which is what a per-step
+  probability needs, but it means the curve is a probability per step, not a
+  Poisson intensity. At the probabilities involved (below 0.2) the two are
+  close.
+- *Circularity of the fit range.* The range [1, 3] is where the market maker
+  quotes, which itself depends on k. Fitting the tail instead would give k
+  near 1 and tighter quotes.
+
+**Validation against reality.** Over the 1000 evaluation episodes of #30, the
+market maker's realised per-step fill frequency, binned by its actual quote
+distance from the mid, is below the fitted curve everywhere: the ratio
+realised/fitted is 0.855 at 1 tick, 0.709 at 1.5, 0.614 at 2, 0.484 at 2.5 and
+0.509 at 3 (inventory strategy; the symmetric strategy gives 0.711 at 1.5 and
+0.631 at 2). The realised curve is also steeper: an exponential fitted to it on
+the same bins has k = 0.9938 per tick (A = 0.409, R^2 = 0.992). The mismatch
+is a finding, not a failure. The most likely cause is queue position: the
+market maker's quotes are on average wider than the background spread (#25),
+so they often sit behind background orders at the same price, and the further
+out the quote, the more likely there is a queue ahead of it. Figure
+`fig4_calibration.png` shows the three curves.
+
+### #29. The pure model reproduces the paper, and one difference in the benchmark
+
+**Choice.** `mm/pure_model.py` simulates the model with no book: fills are
+Bernoulli with probability `A * exp(-k * delta) * dt` and the mid moves by
+`+/- sigma * sqrt(dt)`. It is run with the paper's parameters (s0 = 100, T = 1,
+sigma = 2, dt = 0.005, k = 1.5, A = 140) on 20,000 paths per row, and compared
+with Tables 1 to 3 of Avellaneda and Stoikov (2008), Quantitative Finance 8(3),
+pages 222 to 223, read from the author-hosted copy at
+https://math.nyu.edu/~avellane/HighFrequencyTrading.pdf (1000 paths each).
+
+| gamma | strategy | spread (ours / paper) | profit | std profit | std final q |
+|---|---|---|---|---|---|
+| 0.1 | inventory | 1.49 / 1.49 | 64.90 / 65.0 | 6.54 / 6.6 | 2.91 / 2.9 |
+| 0.1 | symmetric | 1.49 / 1.49 | 67.96 / 68.4 | 13.12 / 12.7 | 8.42 / 8.4 |
+| 0.01 | inventory | 1.35 / 1.35 | 68.43 / 68.6 | 8.96 / 8.7 | 5.17 / 5.1 |
+| 0.01 | symmetric | 1.35 / 1.35 | 68.60 / 68.8 | 13.55 / 12.8 | 8.73 / 8.7 |
+| 1.0 | inventory | 3.03 / 3.02 | 31.49 / 31.4 | 4.84 / 5.0 | 1.63 / 1.7 |
+| 1.0 | symmetric | 3.03 / 3.02 | 43.99 / 44.0 | 9.60 / 11.0 | 5.83 / 5.1 |
+
+Everything agrees to within the paper's sampling error except the gamma = 1
+symmetric row. The paper's text explains why: its symmetric strategy quotes a
+*constant* spread equal to the inventory strategy's time-average, whereas
+`symmetric_quotes` in this project uses the inventory strategy's
+*time-varying* spread, centred on the mid. At gamma = 1 the risk term
+gamma * sigma^2 * (T - t) is the largest part of the spread and falls to zero
+over the episode, so the two benchmarks differ most there. Running
+the paper's constant-spread version (`pure_symmetric_constant_spread` in
+`mm/analysis.py`) gives a std of profit of 10.65 and a std of final inventory
+of 5.15, matching the paper's 11.0 and 5.1. At gamma = 0.1 the two versions
+barely differ (13.26 vs 13.12 for std of profit).
+
+**Alternatives.** Change `symmetric_quotes` to the constant-spread version.
+
+**Trade-off.** The time-varying version is kept: it isolates the inventory
+skew exactly, because both strategies quote the same spread at every instant.
+But its docstring calls it "the paper's benchmark", which is not quite right,
+and any write-up should say "same spread as the inventory strategy, centred on
+the mid".
+
+### #30. Results: inventory strategy vs symmetric in the order-book simulator
+
+1000 shared tapes (seeds 0 to 999), default flow, quote size 5,
+gamma = 0.00046875, sigma = 17.8885, k = 0.7094.
+
+| | inventory (Avellaneda-Stoikov) | symmetric |
+|---|---|---|
+| terminal P&L, mean (s.e.) | 1234.9 (5.5) | 1491.3 (25.0) |
+| terminal P&L, std [95% bootstrap CI] | 173.4 [165.4, 181.3] | 790.9 [739.5, 839.5] |
+| mean / std [95% CI] | 7.122 [6.81, 7.471] | 1.885 [1.76, 2.034] |
+| 5th percentile of P&L [95% CI] | 963.0 [915.5, 981.9] | 229.4 [138.4, 364.5] |
+| fraction of losing episodes | 0.0 | 0.031 |
+| terminal inventory std (lots) | 16.1 | 64.1 |
+| time-average abs(inventory), mean (s.e.) | 4.47 (0.02) | 33.78 (0.61) |
+| max abs(inventory) per episode, mean (s.e.) | 22.3 (0.2) | 76.7 (1.0) |
+| max abs(inventory), worst episode | 58 | 208 |
+| fills per episode | 275.2 | 315.8 |
+| filled lots per episode | 926.6 | 1043.8 |
+| average quoted spread (ticks) | 3.872 | 3.481 |
+| spread P&L vs book mid, mean (s.e.) | 1088.6 (4.1) | 1239.2 (4.3) |
+| inventory P&L vs book mid, mean (s.e.) | 146.4 (3.6) | 252.1 (24.6) |
+
+Paired on the same tape, inventory minus symmetric P&L is -256.4 (s.e. 24.0,
+95% CI [-303.3, -209.4]); the inventory strategy does better on 0.309 of tapes.
+
+Reading:
+- **The skew trades mean for risk, as the theory says.** The inventory strategy
+  earns less on average (the paired difference is clearly negative) but its
+  P&L std is 173.4 against 790.9, its mean/std ratio is 7.122 against 1.885, its 5th percentile is 963.0 against 229.4,
+  and it never lost money in 1000 episodes. The symmetric strategy earns more
+  partly because it quotes a narrower average spread (#25) and fills more, and
+  partly because it carries large inventory in a market where carrying
+  inventory happened to pay (next point).
+- **Positive inventory P&L is a marking effect, not skill.** Both strategies
+  show positive mid-marked inventory P&L. #31 traces this to temporary price
+  impact and reversion of the book mid; marked at the fundamental it vanishes.
+- **This is the same ordering as in the paper** (the symmetric strategy has the
+  higher mean and much higher variance), but the magnitudes differ completely
+  from what the pure model predicts for this market (#32).
+
+### #31. Adverse selection: why the market maker wins here, and where it stops
+
+A surprise flagged during development: inventory P&L marked at
+the book mid averages positive for both strategies, which suggests little or no
+net adverse selection. The proposed but unverified explanation was temporary
+price impact of uninformed market orders followed by reversion of the book mid
+towards the fundamental. The evidence below confirms it, with one refinement:
+adverse selection does exist, from a small minority of fills, and is outweighed
+at the default volatility.
+
+**Method.** For each fill at step s, with sign +1 for the market maker's buys
+and -1 for its sells, the *markout* at horizon h is
+`sign * (price[s + h] - price[s])`, quantity-weighted, using either the book mid
+or the fundamental as the price. Positive means the price moved in the market
+maker's favour after it traded. Each fill's edge against the fundamental also
+splits exactly into three signed pieces: its quoted edge against the mid the
+quote was set against (the mid at the end of step s - 1), plus the move of the
+book mid during the fill step, plus the gap between the fundamental and the mid
+at the close of the fill step. Each fill is also classified from the tape by
+what could have taken it: a market order, a background limit order priced
+through the quote ("crossing"), or "either" when both were present in that
+step.
+
+**Default volatility (0.4 ticks per step), inventory strategy, 1000 episodes:**
+
+| taker | share of lots | quoted edge | mid move in fill step | fundamental minus mid | mid markout h = 1, 5, 20, 100 |
+|---|---|---|---|---|---|
+| all | 1.0000 | 1.708 | -0.534 | 0.162 | 0.029, 0.090, 0.130, 0.154 |
+| market order | 0.9113 | 1.731 | -0.474 | 0.380 | 0.046, 0.160, 0.294, 0.369 |
+| crossing limit | 0.0678 | 1.466 | -1.150 | -2.089 | -0.141, -0.606, -1.538, -2.049 |
+| either | 0.0209 | 1.508 | -1.139 | -2.046 | -0.185, -0.721, -1.585, -1.995 |
+
+Fundamental markouts are zero to within 0.005 ticks at every horizon for all
+fills (0.000, 0.000, -0.001, -0.003), as they must be for a random walk. The
+symmetric strategy shows the same pattern (market-order share 0.9272, mid
+markout at h = 100 of 0.412 for those fills and -2.199 for crossing limit
+orders).
+
+What this shows:
+- **Market orders (0.9113 of lots) are uninformed and push the mid.** When a
+  market sell hits the bid, it also consumes background bids, so the book mid
+  falls during the step (-0.474 ticks on average, signed against the market
+  maker). The fundamental has not moved, so at the close of the step it sits
+  0.380 ticks on the market maker's side of the mid. Over the next 100 steps
+  the mid drifts back by 0.369 ticks: almost exactly the gap. That reversion
+  is the positive mid-marked inventory P&L.
+- **Crossing limit orders (0.0678 of lots) are informed, in the only sense the
+  simulator allows.** They exist because the fundamental has moved through the
+  market maker's stale quote. At the close of the step the fundamental is 2.089
+  ticks against the market maker, and over 100 steps the book mid follows it
+  (-2.049). That is genuine adverse selection, caused by the one-step lag.
+- **Marked at the fundamental, all the profit is spread.** Spread P&L at the
+  fundamental is 1238.3 (s.e. 4.9) and inventory P&L -3.0 (s.e. 3.5) for the
+  inventory strategy; 1481.5 (s.e. 5.7) and 10.3 (s.e. 24.7) for the
+  symmetric strategy. The mid-marked split (1088.6 and 146.4) moves profit
+  from "spread" to "inventory" because it measures the edge against a mid that
+  the trade itself has just displaced.
+
+**Volatility sweep.** FlowConfig.sigma is varied with everything else in the
+flow fixed. For each value, k is re-calibrated from the book with no market
+maker (same seeds and fit range as #28) and ASParams.sigma is set to
+sigma * sqrt(2000); gamma is held at 0.00046875, as a fixed property of the
+trader. 400 shared tapes per point (seeds 0 to 399, so the 0.4 row differs
+slightly from #30).
+
+| sigma (ticks/step) | k | inventory P&L mean (s.e.) | symmetric P&L mean (s.e.) | lots taken by crossing or "either" orders, inventory | inventory P&L at fundamental: spread, inventory |
+|---|---|---|---|---|---|
+| 0.2 | 0.7383 | 1438.6 (10.2) | 1528.6 (21.8) | 0.0194 | 1441.0, -0.0 |
+| 0.4 | 0.7094 | 1235.4 (9.3) | 1491.0 (39.2) | 0.0896 | 1232.8, 3.6 |
+| 0.8 | 0.5980 | 799.3 (9.4) | 1126.0 (80.0) | 0.2344 | 782.0, 14.2 |
+| 1.2 | 0.4945 | 222.2 (10.7) | 655.8 (119.5) | 0.3245 | 211.2, 3.0 |
+| 1.4 | 0.4520 | -111.1 (13.1) | 25.9 (176.5) | 0.3569 | -129.0, 5.1 |
+| 1.6 | 0.4132 | -422.7 (14.1) | -291.9 (225.1) | 0.3809 | -431.5, -4.6 |
+| 3.2 | 0.2440 | -2986.2 (35.3) | -2612.0 (501.2) | 0.4864 | -3018.8, -27.9 |
+
+- **The market maker stops making money between 1.2 and 1.4 ticks per step.**
+  The inventory strategy's mean P&L is significantly positive at 1.2 and
+  significantly negative at 1.4. The symmetric strategy is significantly
+  positive up to 1.2, indistinguishable from zero at 1.4 and 1.6, and
+  significantly negative at 3.2. As volatility rises, the share of lots taken
+  by crossing limit orders grows from 0.0194 to 0.4864 and the mid markouts
+  turn negative (inventory strategy, h = 100: 0.269 at 0.2, -0.158 at 0.8,
+  -1.395 at 3.2).
+- **Re-calibration widens the quotes but not enough.** k falls as the book
+  spreads out, so the quoted spread grows (inventory strategy: 3.697 ticks at
+  0.2, 16.283 at 3.2), but losses still grow.
+- **Marked at the book mid, the losses look like inventory losses; at the
+  fundamental they are spread losses.** At sigma 3.2 the symmetric strategy's
+  mid-marked split is spread 3126.9, inventory -5738.9, while at the
+  fundamental it is spread -3007.1, inventory 280.6. The money is lost at the
+  moment of the fill, against a mid that has not yet caught up with the
+  fundamental. A desk reading only mid-marked attribution would draw the wrong
+  conclusion.
+- **Robustness to the gamma convention.** Holding gamma * sigma^2 fixed instead
+  (the same skew in ticks at every volatility) moves the break-even for the
+  inventory strategy: still significantly positive at 1.4 (325.8, s.e. 38.2),
+  indistinguishable from zero at 1.6 (-75.4, s.e. 49.6), negative at 3.2.
+
+**The default configuration is a benign market for a market maker.** A share
+of 0.9113 of its volume is with uninformed market orders, the fundamental moves 0.4 ticks
+per step against an average quoted spread of 3.872 ticks, and the
+price impact of its counterparties reverts in its favour. The positive results
+in #30 are a property of this flow, not evidence that the strategy would make
+money in a real market. Figures: `fig7_volatility_sweep.png`,
+`fig8_markouts.png`.
+
+### #32. The order-book simulator against the pure model with matched parameters
+
+The pure model is run with dt = 1 step, 2000 steps, sigma = 0.4 per step, the
+calibrated A = 0.3734 and k = 0.7094, fill size 5 and the same gamma, on 20,000
+paths.
+
+| | inventory: book | inventory: pure | symmetric: book | symmetric: pure |
+|---|---|---|---|---|
+| P&L mean | 1234.9 | 3638.8 | 1491.3 | 3880.5 |
+| P&L std | 173.4 | 214.1 | 790.9 | 1347.8 |
+| terminal inventory std | 16.1 | 24.7 | 64.1 | 107.4 |
+| fills per episode | 275.2 | 567.2 | 315.8 | 535.1 |
+| filled lots per episode | 926.6 | 2836.0 | 1043.8 | 2675.3 |
+| P&L per filled lot | 1.333 | 1.283 | 1.429 | 1.451 |
+| average quoted spread | 3.872 | 2.893 | 3.481 | 2.893 |
+
+The pure model overstates P&L by a wide margin, and almost all of it is
+volume: P&L per filled lot is close in the two (1.333 vs 1.283 for the
+inventory strategy). Following the inventory strategy's per-side, per-step fill
+probability down the chain:
+- the pure model, quoting at its continuous distances: 0.1418;
+- the same calibrated curve, evaluated at the distances the book market maker
+  actually quoted after outward rounding and the passivity clamp: 0.0996;
+- what the book market maker actually got: 0.0652 (the queue-position and
+  own-impact effects of #28);
+- and when it does fill, it gets 3.367 lots per fill on average instead of 5,
+  because many fills are partial.
+
+What the pure model leaves out, and where it shows:
+- *Discrete ticks and conservative rounding*: wider quotes, fewer fills
+  (0.1418 to 0.0996 above), and more edge per fill.
+- *Queue position*: fewer fills than the reach curve implies (0.0996 to 0.0652).
+- *Partial fills*: 3.367 lots per fill rather than 5.
+- *One-step lag and price impact*: the pure model's mid is independent of
+  fills, so it has neither the adverse selection from crossing limit orders
+  nor the favourable reversion after market orders. At the default volatility
+  the two appear to roughly cancel, which would explain why P&L per lot agrees;
+  #31 shows they do not cancel at higher volatility.
+- *Passivity clamp*: in the book a heavily skewed quote cannot cross the
+  background touch; in the pure model it can sit at or through the mid, where
+  the fill probability is simply clipped at 1.
+
+Lower volume in the book also explains the lower inventory std. Figure:
+`fig5_pure_vs_book.png`.
+
+### #33. Risk aversion, the end of the episode, and limitations
+
+**Risk-aversion sweep** (inventory strategy, 500 shared tapes, seeds 0 to 499;
+"skew per quote" is the reservation-price shift for 5 lots at t = 0):
+
+| gamma / default | skew per quote (ticks) | P&L mean (s.e.) | P&L std | mean / std | terminal inventory std |
+|---|---|---|---|---|---|
+| 0.1 | 0.075 | 1423.7 (15.4) | 343.6 | 4.144 | 32.2 |
+| 0.2 | 0.15 | 1384.7 (12.8) | 285.5 | 4.851 | 26.0 |
+| 0.5 | 0.375 | 1316.9 (9.9) | 222.2 | 5.927 | 19.4 |
+| 1 | 0.75 | 1233.6 (8.2) | 182.5 | 6.758 | 16.0 |
+| 2 | 1.5 | 1096.0 (6.9) | 154.1 | 7.110 | 13.4 |
+| 5 | 3.75 | 757.4 (5.0) | 112.9 | 6.712 | 10.4 |
+| 10 | 7.5 | 313.3 (4.0) | 90.4 | 3.467 | 8.9 |
+| symmetric | 0 | 1481.9 (34.6) | 772.7 | 1.918 | 62.3 |
+
+Mean and std both fall monotonically as gamma rises: a clean risk/return
+frontier with the symmetric strategy at its high-risk end. The mean/std ratio
+peaks at 2x the default (7.110), so the default rule is close to but not at the
+best ratio on this grid. Figure: `fig6_gamma_frontier.png`.
+
+**Inventory over time.** The second surprise flagged during development: the inventory
+strategy's inventory std grows near the end of the episode. Confirmed. The
+cross-sectional std of inventory across the 1000 tapes of #30 is 3.59 lots at
+step 99, 4.66 at step 999, 6.29 at step 1499, 9.32 at step 1799 and 16.07 at
+the last step; its mean over steps 500 to 1499 is 4.82. The cause is in the
+formula: the skew is `q * gamma * sigma^2 * (T - t)`, which falls linearly to
+zero (0.7125 ticks per quote at step 99, 0.075 at step 1799, 0 at the end), so
+inventory control switches off as the horizon approaches and inventory
+diffuses freely. The terminal inventory std quoted in #30 (16.1) is therefore
+mostly a measure of the last few hundred steps; during the bulk of the episode
+the strategy holds inventory several times tighter. The symmetric strategy's
+std grows throughout, to 64.12. Figure: `fig3_inventory_std_over_time.png`.
+
+**Limitations that matter for any conclusion about real trading.**
+- *Uninformed flow.* Market orders carry no information; the only informed
+  flow is limit orders reacting to a fundamental move. Real order flow contains
+  traders who know more than the market maker. #31 shows how quickly results
+  turn when even this mechanical form of information becomes common.
+- *No fees or rebates.* Real maker rebates and taker fees would shift every
+  P&L number; nothing here models them.
+- *No latency model beyond one step.* The market maker always reacts exactly
+  one step late, and nobody is faster.
+- *A single market maker with no competition.* The background never improves
+  on the market maker's quotes or competes for queue priority; real market
+  makers compete on price and speed.
+- *The market maker knows sigma.* It is given the true volatility; k is
+  calibrated, but from a book without it.
+- *A finite horizon that switches off inventory control at the end* (above). A
+  real desk running continuously would not want this; the infinite-horizon
+  variants of the model avoid it.
+- *Synthetic everything.* The flow parameters were tuned to give a stable book
+  and a few hundred fills per episode, not fitted to any real market. The
+  numbers describe this simulator; they are not estimates of what the strategy
+  would earn anywhere real.

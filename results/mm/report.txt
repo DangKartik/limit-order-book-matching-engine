@@ -1,0 +1,200 @@
+Stage-4 analysis. Units: prices in ticks, quantity in lots, P&L in ticks x lots.
+Flow: default FlowConfig (2000 measured steps after 200 warm-up, fundamental sigma 0.4 ticks/step). Workers: 10.
+==============================================================================
+1. Pure Avellaneda-Stoikov model, the paper's parameters
+   s0=100, T=1, sigma=2, dt=0.005 (200 steps), k=1.5, A=140; 20,000 paths per row (the paper used 1000)
+==============================================================================
+gamma strategy           spread  profit     sd  final q   sd q
+  0.1 inventory    ours    1.49   64.90   6.54    -0.00   2.91
+                  paper    1.49    65.0    6.6     0.08    2.9
+  0.1 symmetric    ours    1.49   67.96  13.12    -0.03   8.42
+                  paper    1.49    68.4   12.7     0.26    8.4
+ 0.01 inventory    ours    1.35   68.43   8.96    -0.01   5.17
+                  paper    1.35    68.6    8.7     0.12    5.1
+ 0.01 symmetric    ours    1.35   68.60  13.55    -0.00   8.73
+                  paper    1.35    68.8   12.8     0.09    8.7
+  1.0 inventory    ours    3.03   31.49   4.84     0.01   1.63
+                  paper    3.02    31.4    5.0     0.02    1.7
+  1.0 symmetric    ours    3.03   43.99   9.60     0.01   5.83
+                  paper    3.02    44.0   11.0     0.00    5.1
+Paper figures: Avellaneda & Stoikov (2008), Quantitative Finance 8(3), Tables 1-3, p. 222-223; https://math.nyu.edu/~avellane/HighFrequencyTrading.pdf
+Standard error of our mean profit is std/sqrt(20000); of the paper's, std/sqrt(1000).
+Paper's own symmetric benchmark (constant spread = inventory strategy's average spread):
+  0.1 sym-const    ours    1.49   68.16  13.26    -0.02   8.42
+ 0.01 sym-const    ours    1.35   68.59  13.56    -0.00   8.72
+  1.0 sym-const    ours    3.03   43.66  10.65     0.04   5.15
+==============================================================================
+2. Fill-curve calibration from the book with no market maker
+==============================================================================
+200 episodes (seeds 10000..10199), both sides pooled: 800,000 side-steps; aggressive flow arrived on 0.2017 of them (reach is NaN on the rest, counted as 'not reached').
+ delta  P(reach>=delta)  side-steps reached   local slope to next point
+   0.5         0.198211              158569    0.298
+   1.0         0.170734              136587    0.478
+   1.5         0.134463              107570    0.659
+   2.0         0.096732               77386    0.787
+   2.5         0.065272               52218    0.901
+   3.0         0.041596               33277    0.957
+   3.5         0.025775               20620    1.010
+   4.0         0.015554               12443    1.033
+   4.5         0.009277                7422    1.022
+   5.0         0.005566                4453    1.022
+   5.5         0.003339                2671    0.990
+   6.0         0.002035                1628    0.975
+   6.5         0.001250                1000    1.012
+   7.0         0.000754                 603    0.971
+   7.5         0.000464                 371    0.983
+   8.0         0.000284                 227      nan
+Fit on delta in [1.0, 3.0] (where the market maker quotes): A = 0.3734 per step, k = 0.7094 per tick, R^2 = 0.9866, max |log residual| = 0.073
+For context, the tail [3.0, 8.0]: A = 0.8433, k = 1.0019, R^2 = 0.9999. The curve is not one exponential: it is flatter near the touch and steeper further out.
+Quoting parameters: gamma = 0.00046875, sigma = 17.8885 ticks/sqrt(episode), k = 0.7094; model spread 2.9684 ticks at t=0, 2.8184 at t=T
+==============================================================================
+3. Order-book simulator: inventory vs symmetric on the same 1000 tapes (seeds 0..999)
+   quote size 5; ASParams gamma=0.00046875, sigma=17.8885 ticks/sqrt(episode), k=0.7094
+==============================================================================
+                                              inventory (A-S)              symmetric
+  terminal PnL mean +/- s.e.                   1234.9 +/- 5.5        1491.3 +/- 25.0
+  terminal PnL std [95% CI]              173.4 [165.4, 181.3]   790.9 [739.5, 839.5]
+  mean / std [95% CI]                     7.122 [6.81, 7.471]    1.885 [1.76, 2.034]
+  5th percentile PnL [95% CI]            963.0 [915.5, 981.9]   229.4 [138.4, 364.5]
+  fraction of losing episodes                             0.0                  0.031
+  terminal inventory mean / std                  -0.03 / 16.1            0.93 / 64.1
+  time-average |inventory|                      4.47 +/- 0.02         33.78 +/- 0.61
+  max |inventory| per episode                    22.3 +/- 0.2           76.7 +/- 1.0
+  max |inventory|, worst episode                           58                    208
+  fills per episode                             275.2 +/- 0.9          315.8 +/- 0.9
+  filled quantity per episode                   926.6 +/- 3.1         1043.8 +/- 3.2
+  average quoted spread (ticks)               3.872 +/- 0.001        3.481 +/- 0.001
+  average background spread (ticks)           2.921 +/- 0.004        2.875 +/- 0.003
+  spread PnL (vs book mid)                     1088.6 +/- 4.1         1239.2 +/- 4.3
+  inventory PnL (vs book mid)                   146.4 +/- 3.6         252.1 +/- 24.6
+  Paired PnL difference, inventory minus symmetric, same tape: -256.4 +/- 24.0 (95% CI [-303.3, -209.4]); per-tape std 757.5; inventory better on 0.309 of tapes
+------------------------------------------------------------------------------
+2b. Validation: fitted curve vs the market maker's realised fill frequency (experiment 3 episodes)
+    'fill' = at least one fill on that quote during the step it was exposed; bids and asks pooled
+  inventory:  delta  quote-steps  realised  fitted  realised/fitted
+              0.0         1207    0.2999  0.3734   0.803
+              0.5        15238    0.2271  0.2619   0.867
+              1.0       160834    0.1571  0.1837   0.855
+              1.5      1219370    0.0914  0.1289   0.709
+              2.0      1662999    0.0555  0.0904   0.614
+              2.5       807715    0.0307  0.0634   0.484
+              3.0       118444    0.0226  0.0445   0.509
+              3.5        11045    0.0244  0.0312   0.784
+  symmetric:  delta  quote-steps  realised  fitted  realised/fitted
+              1.5      2073930    0.0916  0.1289   0.711
+              2.0      1924070    0.0570  0.0904   0.631
+  Realised / fitted over delta [1.0, 1.5, 2.0, 2.5, 3.0]: 0.484 to 0.855
+  Effective curve fitted to the inventory strategy's realised fills on the same bins: A = 0.409 per step, k = 0.9938 per tick (R^2 0.992)
+==============================================================================
+4. Order-book simulator vs pure model with matched parameters
+   pure model: dt = 1 step, 2000 steps, sigma = 0.4 ticks/step, same gamma, calibrated A = 0.3734, k = 0.7094, fill_size = 5, 20,000 paths
+==============================================================================
+                           PnL mean  PnL std  inv std  mean|q|   fills     lots  PnL/lot  spread
+  order book   inventory     1234.9    173.4     16.1     4.47   275.2    926.6    1.333   3.872
+  pure model   inventory     3638.8    214.1     24.7     6.04   567.2   2836.0    1.283   2.893
+    fill probability per side-step: pure model 0.1418 -> calibrated curve at the book's actual quote distances 0.0996 -> realised 0.0652; lots per fill 5 (pure) vs 3.367 (book)
+  order book   symmetric     1491.3    790.9     64.1    33.78   315.8   1043.8    1.429   3.481
+  pure model   symmetric     3880.5   1347.8    107.4    56.68   535.1   2675.3    1.451   2.893
+    fill probability per side-step: pure model 0.1338 -> calibrated curve at the book's actual quote distances 0.1103 -> realised 0.0749; lots per fill 5 (pure) vs 3.305 (book)
+  Quote-steps at distances outside 0..6 ticks (or with no quote) are left out of the chain; their share: inventory 3.6e-05, symmetric 0.0
+  'spread' for the book is the average integer quote spread after rounding and the passivity clamp;
+  for the pure model it is the continuous formula value averaged over time.
+==============================================================================
+5. Adverse selection at the default volatility (experiment 3 episodes)
+   markout(h) = sign * (price[s+h] - price[s]) per lot, s = fill step, sign +1 for our buys;
+   positive = the price moved our way after the fill. Quantity-weighted means, in ticks.
+==============================================================================
+  inventory:
+    attribution marked at book mid:     spread 1088.6 +/- 4.1, inventory 146.4 +/- 3.6
+    attribution marked at fundamental:  spread 1238.3 +/- 4.9, inventory -3.0 +/- 3.5, total 1235.4 +/- 5.5
+    taker    qty share   edge  impact  F-mid | mid markout h=1,5,20,100 | fundamental markout h=1,5,20,100
+    all         1.0000  1.708  -0.534  0.162 |  0.029  0.090  0.130  0.154 |  0.000  0.000 -0.001 -0.003
+    market      0.9113  1.731  -0.474  0.380 |  0.046  0.160  0.294  0.369 |  0.000  0.000 -0.001 -0.005
+    limit       0.0678  1.466  -1.150 -2.089 | -0.141 -0.606 -1.538 -2.049 |  0.005  0.004 -0.007  0.013
+    either      0.0209  1.508  -1.139 -2.046 | -0.185 -0.721 -1.585 -1.995 | -0.005 -0.013  0.013  0.034
+  symmetric:
+    attribution marked at book mid:     spread 1239.2 +/- 4.3, inventory 252.1 +/- 24.6
+    attribution marked at fundamental:  spread 1481.5 +/- 5.7, inventory 10.3 +/- 24.7, total 1491.8 +/- 25.4
+    taker    qty share   edge  impact  F-mid | mid markout h=1,5,20,100 | fundamental markout h=1,5,20,100
+    all         1.0000  1.680  -0.493  0.232 |  0.042  0.129  0.200  0.226 |  0.001 -0.000  0.001 -0.008
+    market      0.9272  1.684  -0.441  0.423 |  0.057  0.190  0.342  0.412 |  0.000 -0.001  0.000 -0.011
+    limit       0.0550  1.636  -1.164 -2.217 | -0.136 -0.614 -1.609 -2.199 |  0.007  0.004  0.003  0.001
+    either      0.0179  1.645  -1.124 -2.142 | -0.164 -0.727 -1.610 -2.031 |  0.001  0.000  0.049  0.107
+  edge = quoted edge vs the mid the quote was set against; impact = signed move of the book mid
+  during the fill step; F-mid = signed gap between fundamental and book mid at the close of that step.
+------------------------------------------------------------------------------
+5b. Volatility sweep: FlowConfig.sigma varied, everything else in the flow fixed.
+    For each sigma: ASParams.sigma = sigma*sqrt(n_steps), k re-calibrated from the book with no
+    market maker (same seeds and fit range as experiment 2), gamma held at 0.00046875.
+    Robustness rows ('rescaled gamma') instead hold gamma*sigma^2 fixed. 400 shared tapes per point.
+  sigma 0.2 k 0.7383 inventory PnL   1438.6 +/-   10.2 sd   204.6 | spread  1194.5 inv    244.1 | at F: spread  1441.0 inv    -0.0 | fills 278.9 quoted spread  3.697
+        markout mid h=1,5,20,100:  0.045  0.140  0.231  0.269 | fundamental:  0.001  0.000  0.002  0.001 | limit-or-either taker share 0.0194
+        rescaled gamma 0.001875: PnL   1291.7 +/-    8.1 sd   161.7
+  sigma 0.2 k 0.7383 symmetric PnL   1528.6 +/-   21.8 sd   436.5 | spread  1258.4 inv    270.2 | at F: spread  1543.3 inv    -9.6 | fills 299.7 quoted spread  3.515
+        markout mid h=1,5,20,100:  0.048  0.149  0.249  0.290 | fundamental:  0.001 -0.000  0.002 -0.004 | limit-or-either taker share 0.0146
+        rescaled gamma 0.001875: PnL   1528.6 +/-   21.8 sd   436.5
+  sigma 0.4 k 0.7094 inventory PnL   1235.4 +/-    9.3 sd   185.3 | spread  1085.0 inv    150.4 | at F: spread  1232.8 inv     3.6 | fills 275.0 quoted spread  3.874
+        markout mid h=1,5,20,100:  0.031  0.090  0.129  0.161 | fundamental:  0.001 -0.002  0.001  0.005 | limit-or-either taker share 0.0896
+        rescaled gamma 0.00046875: PnL   1235.4 +/-    9.3 sd   185.3
+  sigma 0.4 k 0.7094 symmetric PnL   1491.0 +/-   39.2 sd   783.9 | spread  1231.7 inv    259.3 | at F: spread  1475.1 inv    21.5 | fills 314.8 quoted spread  3.482
+        markout mid h=1,5,20,100:  0.043  0.130  0.206  0.235 | fundamental:  0.001 -0.002  0.010 -0.003 | limit-or-either taker share 0.0738
+        rescaled gamma 0.00046875: PnL   1491.0 +/-   39.2 sd   783.9
+  sigma 0.8 k 0.5980 inventory PnL    799.3 +/-    9.4 sd   187.9 | spread   963.7 inv   -164.4 | at F: spread   782.0 inv    14.2 | fills 300.6 quoted spread  4.630
+        markout mid h=1,5,20,100: -0.024 -0.073 -0.145 -0.158 | fundamental:  0.001  0.002  0.000  0.001 | limit-or-either taker share 0.2344
+        rescaled gamma 0.000117187: PnL   1078.8 +/-   15.4 sd   307.9
+  sigma 0.8 k 0.5980 symmetric PnL   1126.0 +/-   80.0 sd  1599.5 | spread  1312.8 inv   -186.9 | at F: spread  1108.6 inv     6.1 | fills 288.7 quoted spread  4.532
+        markout mid h=1,5,20,100:  0.026  0.013 -0.114 -0.156 | fundamental:  0.005  0.005  0.026  0.031 | limit-or-either taker share 0.2123
+        rescaled gamma 0.000117187: PnL   1126.0 +/-   80.0 sd  1599.5
+  sigma 1.2 k 0.4945 inventory PnL    222.2 +/-   10.7 sd   214.6 | spread   725.1 inv   -502.9 | at F: spread   211.2 inv     3.0 | fills 322.3 quoted spread  5.807
+        markout mid h=1,5,20,100: -0.083 -0.231 -0.390 -0.431 | fundamental:  0.000 -0.001 -0.010 -0.013 | limit-or-either taker share 0.3245
+        rescaled gamma 5.20833e-05: PnL    656.0 +/-   28.4 sd   567.6
+  sigma 1.2 k 0.4945 symmetric PnL    655.8 +/-  119.5 sd  2389.9 | spread  1494.3 inv   -838.6 | at F: spread   596.6 inv    41.1 | fills 276.6 quoted spread  5.771
+        markout mid h=1,5,20,100: -0.028 -0.218 -0.703 -0.928 | fundamental:  0.005  0.006  0.030  0.026 | limit-or-either taker share 0.3209
+        rescaled gamma 5.20833e-05: PnL    670.5 +/-  129.5 sd  2590.0
+  sigma 1.4 k 0.4520 inventory PnL   -111.1 +/-   13.1 sd   261.4 | spread   562.6 inv   -673.7 | at F: spread  -129.0 inv     5.1 | fills 333.7 quoted spread  6.496
+        markout mid h=1,5,20,100: -0.120 -0.300 -0.499 -0.531 | fundamental:  0.003  0.002 -0.001  0.006 | limit-or-either taker share 0.3569
+        rescaled gamma 3.82653e-05: PnL    325.8 +/-   38.2 sd   764.1
+  sigma 1.4 k 0.4520 symmetric PnL     25.9 +/-  176.5 sd  3529.5 | spread  1659.4 inv  -1633.5 | at F: spread   190.6 inv  -194.8 | fills 286.2 quoted spread  6.328
+        markout mid h=1,5,20,100: -0.068 -0.400 -1.157 -1.484 | fundamental:  0.001 -0.005  0.015  0.030 | limit-or-either taker share 0.3701
+        rescaled gamma 3.82653e-05: PnL   -235.9 +/-  222.5 sd  4449.4
+  sigma 1.6 k 0.4132 inventory PnL   -422.7 +/-   14.1 sd   282.5 | spread   395.5 inv   -818.2 | at F: spread  -431.5 inv    -4.6 | fills 341.4 quoted spread  7.302
+        markout mid h=1,5,20,100: -0.149 -0.364 -0.586 -0.640 | fundamental: -0.003 -0.006 -0.013 -0.014 | limit-or-either taker share 0.3809
+        rescaled gamma 2.92969e-05: PnL    -75.4 +/-   49.6 sd   991.4
+  sigma 1.6 k 0.4132 symmetric PnL   -291.9 +/-  225.1 sd  4501.5 | spread  1787.1 inv  -2079.1 | at F: spread  -165.7 inv  -162.4 | fills 282.2 quoted spread  7.043
+        markout mid h=1,5,20,100: -0.104 -0.555 -1.591 -2.011 | fundamental: -0.005 -0.009 -0.021  0.052 | limit-or-either taker share 0.4078
+        rescaled gamma 2.92969e-05: PnL  -1117.1 +/-  328.5 sd  6569.9
+  sigma 3.2 k 0.2440 inventory PnL  -2986.2 +/-   35.3 sd   705.8 | spread  -935.6 inv  -2050.6 | at F: spread -3018.8 inv   -27.9 | fills 363.6 quoted spread 16.283
+        markout mid h=1,5,20,100: -0.387 -0.890 -1.387 -1.395 | fundamental: -0.007  0.005 -0.048 -0.039 | limit-or-either taker share 0.4864
+        rescaled gamma 7.32422e-06: PnL  -5138.5 +/-  175.7 sd  3513.3
+  sigma 3.2 k 0.2440 symmetric PnL  -2612.0 +/-  501.2 sd 10024.8 | spread  3126.9 inv  -5738.9 | at F: spread -3007.1 inv   280.6 | fills 269.7 quoted spread 13.987
+        markout mid h=1,5,20,100: -0.440 -2.086 -5.221 -6.522 | fundamental: -0.005  0.037  0.097  0.224 | limit-or-either taker share 0.5613
+        rescaled gamma 7.32422e-06: PnL  -6441.4 +/-  863.7 sd 17273.7
+  Sign of mean PnL at each sigma (+ / - = 95% CI excludes zero, 0 = not distinguishable):
+    fixed_gamma     inventory 0.2@+  0.4@+  0.8@+  1.2@+  1.4@-  1.6@-  3.2@-
+    fixed_gamma     symmetric 0.2@+  0.4@+  0.8@+  1.2@+  1.4@0  1.6@0  3.2@-
+    rescaled_gamma  inventory 0.2@+  0.4@+  0.8@+  1.2@+  1.4@+  1.6@0  3.2@-
+    rescaled_gamma  symmetric 0.2@+  0.4@+  0.8@+  1.2@+  1.4@0  1.6@-  3.2@-
+==============================================================================
+6. Risk-aversion sweep, inventory strategy, 500 shared tapes per point (seeds 0..499)
+==============================================================================
+   gamma x skew/quote  PnL mean  s.e.  PnL std mean/std  inv std  mean|q|  fills  spread
+       0.1      0.075    1423.7  15.4    343.6    4.144     32.2    12.22  296.5   3.650
+       0.2      0.150    1384.7  12.8    285.5    4.851     26.0     9.04  287.9   3.729
+       0.5      0.375    1316.9   9.9    222.2    5.927     19.4     6.07  278.4   3.822
+       1.0      0.750    1233.6   8.2    182.5    6.758     16.0     4.47  274.9   3.873
+       2.0      1.500    1096.0   6.9    154.1    7.110     13.4     3.27  268.1   3.994
+       5.0      3.750     757.4   5.0    112.9    6.712     10.4     2.23  267.7   4.239
+      10.0      7.500     313.3   4.0     90.4    3.467      8.9     1.79  281.9   4.688
+       sym      0.000    1481.9  34.6    772.7    1.918     62.3    33.64  315.0   3.482
+  skew/quote = reservation-price shift (ticks) from holding one quote's worth of inventory at t = 0.
+==============================================================================
+7. Cross-sectional std of inventory across the experiment-3 tapes, by step
+==============================================================================
+  step:                   99     499     999    1499    1799    1899    1949    1999
+  skew/quote (ticks): 0.7125  0.5625  0.3750  0.1875  0.0750  0.0375  0.0187  0.0000
+  inventory             3.59    3.79    4.66    6.29    9.32   11.22   12.96   16.07
+      mean over steps 500..1499: 4.82
+  symmetric            13.45   31.10   43.69   55.75   60.66   62.17   63.08   64.12
+      mean over steps 500..1499: 43.97
+==============================================================================
+Timings (s): exp1 0.5, exp2 0.4, exp3 7.7, exp4 0.8, exp5 55.6, exp6 28.8, figures 1.2, total 95.2
