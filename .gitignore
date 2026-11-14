@@ -1,0 +1,17 @@
+# CMake build trees
+build/
+build-*/
+cmake-build-*/
+compile_commands.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.so
+*.egg-info/
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
