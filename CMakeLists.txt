@@ -17,6 +17,7 @@ endif()
 
 option(LOB_BUILD_TESTS "Build the unit tests" ON)
 option(LOB_BUILD_BENCH "Build the benchmark harness" ON)
+option(LOB_BUILD_PYTHON "Build the pybind11 Python module (pylob)" OFF)
 option(LOB_SANITIZE "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 
 # Sanitizers instrument the code to catch memory errors (use-after-free,
@@ -48,4 +49,10 @@ endif()
 
 if(LOB_BUILD_BENCH)
   add_subdirectory(bench)
+endif()
+
+# Off by default so that a plain C++ build needs no Python. Never combine with
+# LOB_SANITIZE: a sanitized module cannot be loaded by a normal Python.
+if(LOB_BUILD_PYTHON)
+  add_subdirectory(bindings)
 endif()

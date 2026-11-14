@@ -630,3 +630,72 @@ vector indexed by order id) is the obvious next optimisation and is not done.
 
 `OrderBook` remains an alias for the baseline. The Python bindings in stage 3
 use `FlatPoolBook`, the fastest measured.
+
+---
+
+## Stage 3: Python bindings
+
+### #21. pybind11, with the binding layer kept outside the engine
+
+**Choice.** `bindings/pylob.cpp` exposes the engine as a Python module, `pylob`,
+using pybind11 (fetched and pinned by CMake, like GoogleTest). The engine headers
+do not mention Python. The module is built only with `-DLOB_BUILD_PYTHON=ON`
+and is written into `python/`, where the Python code imports it.
+
+**Alternatives.**
+- `ctypes` or `cffi` over a C interface: no build-time dependency, but it needs
+  a hand-written C wrapper and gives no automatic conversion of classes, enums,
+  vectors or exceptions.
+- Cython: a separate language to learn and maintain.
+- Reimplementing the book in Python for the simulator: then the market maker
+  would not be trading against the engine this project is about.
+- Packaging with `pyproject.toml` and scikit-build-core so that `pip install .`
+  works: the right thing for a library other people install; more machinery
+  than a single-machine project needs. Not done.
+
+**Trade-off.** pybind11 generates the conversion code from short declarations
+and maps C++ concepts onto their Python equivalents: `std::optional` becomes
+`None` or a value, `std::vector` becomes a list, `std::pair` a tuple,
+`std::invalid_argument` a `ValueError`, and a wrong argument type a `TypeError`.
+It is header-only but heavy on templates, so `pylob.cpp` is the slowest file in
+the project to compile. The built module is tied to one Python version
+(`pylob.cpython-314-darwin.so`).
+
+Ownership across the boundary, which is the part with no Python analogue: the
+Python object owns the C++ book, and the book is destroyed when Python's
+reference count for it reaches zero. `Trade`, `OrderResult` and `LevelView` are
+copied into new Python objects, so nothing Python holds points into memory the
+engine might later free or reuse.
+
+### #22. The Python API returns trades instead of taking a buffer
+
+**Choice.** `book.add_limit(side, price, qty)` returns a tuple
+`(OrderResult, list_of_trades)`. The wrapper struct `PyBook` owns one
+`std::vector<Trade>` for the life of the book, clears it before each call, and
+copies its contents into the returned list.
+
+**Alternatives.** Mirror the C++ signature and make Python pass a buffer object
+in; or keep the trades inside the wrapper and add a `book.last_trades()` call.
+
+**Trade-off.** The caller-owned buffer exists to avoid allocation in C++ (#6).
+Python allocates objects on every call regardless, so that discipline buys
+nothing there and would make the API awkward. Returning the trades makes each
+call self-contained, and a test checks that a list returned earlier is not
+changed by a later call. The C++ side still allocates nothing per order.
+
+Two books are bound: `pylob.OrderBook` is `FlatPoolBook` and
+`pylob.BaselineOrderBook` is `MapListBook`. A Python test replays one random
+stream through both and requires identical results.
+
+**Measured cost.** `python/bench_bindings.py` times a Python loop that submits
+1,000,000 limit orders and cancels some of them. On this machine one loop
+iteration takes about 390 ns with `OrderBook` and about 410 ns with
+`BaselineOrderBook` (best of 5 runs). The engine operation inside is tens of
+nanoseconds (#20), so roughly nine tenths of the time is the Python interpreter
+and the conversion layer, and the choice of data structure barely shows. The
+bindings are for driving experiments, not for speed; anything latency-sensitive
+belongs in C++.
+
+The GIL (Python's global interpreter lock) is held for the whole of every call.
+Releasing it would be pointless: each call is far shorter than the cost of
+releasing and re-taking the lock, and the engine is single-threaded by design.
