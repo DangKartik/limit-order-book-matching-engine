@@ -1,32 +1,51 @@
-# Limit Order Book and Matching Engine
+<h1 align="center">Limit Order Book and Matching Engine</h1>
 
-A single-instrument limit order book and matching engine in C++20, with Python
-bindings and a market-making simulator on top. The engine does price-time
-priority matching of limit and market orders, with cancels and partial fills.
-I wrote the matching logic once as a class template and compiled it against
-four combinations of data structures, so that a hand-written benchmark harness
-could measure what each choice is worth. An Avellaneda-Stoikov market maker
-then quotes in the real book while a synthetic tape of orders trades against
-it. The project is meant to show that I can implement matching rules correctly
-and test them hard, measure performance honestly and say what my measurements
-cannot show, evaluate a strategy in simulation without fooling myself, and
-explain every trade-off I made. The reasoning lives in
-[docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md); this README is the summary.
+<p align="center"><b>A price-time priority matching engine in C++20, benchmarked across four data-structure designs, with Python bindings and an Avellaneda-Stoikov market maker trading against simulated flow in the real book.</b></p>
 
-| Stage | What | Status |
-|---|---|---|
-| 1 | Core engine: price-time priority, limit / market / cancel, partial fills, CMake, GoogleTest | done |
-| 2 | Four selectable data-structure combinations, custom benchmark harness | done |
-| 3 | Python bindings with pybind11 | done |
-| 4 | Avellaneda-Stoikov market maker in Python against simulated flow through the real book | done |
-| 5 | This README: design, trade-offs, benchmark results, limitations | done |
+<p align="center">
+  <a href="https://github.com/DangKartik/limit-order-book-matching-engine/actions/workflows/tests.yml"><img alt="tests" src="https://github.com/DangKartik/limit-order-book-matching-engine/actions/workflows/tests.yml/badge.svg"></a>
+  <img alt="C++20" src="https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white">
+  <img alt="CMake" src="https://img.shields.io/badge/CMake-3.25%2B-064F8C?logo=cmake&logoColor=white">
+  <img alt="pybind11" src="https://img.shields.io/badge/pybind11-3.0-3776AB?logo=python&logoColor=white">
+  <img alt="NumPy" src="https://img.shields.io/badge/NumPy-013243?logo=numpy&logoColor=white">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-2ea44f">
+</p>
+
+**Topics:** limit order book · matching engine · price-time priority · C++20 templates · object pools · intrusive lists · benchmarking · tail latency · AddressSanitizer · differential testing · pybind11 · market making · Avellaneda-Stoikov · adverse selection
+
+The engine matches limit and market orders with cancels and partial fills. I wrote the matching logic once, as a class template, and compiled it against four combinations of data structures so that a hand-written benchmark harness could measure what each choice is worth. A Python market maker then quotes in the real book while a synthetic tape of orders trades against it. The full reasoning is in [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) (33 numbered entries); this README is the summary.
+
+<table>
+<tr>
+<td width="50%"><img src="results/mm/fig2_pnl_distribution.png" alt="Terminal P&L distributions of the inventory and symmetric strategies"></td>
+<td width="50%"><img src="results/mm/fig8_markouts.png" alt="Fill markouts at the book mid and at the fundamental"></td>
+</tr>
+<tr>
+<td align="center"><sub>Terminal P&amp;L over 1000 shared tapes: inventory skew vs symmetric quoting</sub></td>
+<td align="center"><sub>Markouts: mid-marked gains vanish at the fundamental</sub></td>
+</tr>
+</table>
+
+## Key results
+
+| | Result |
+|---|---|
+| **Is the matching correct?** | 157 C++ tests pass in Release and under AddressSanitizer + UBSan, including a differential test of 100,000 random operations against a deliberately naive reference book, run on all four implementations. 49 Python tests cover the bindings and simulator. |
+| **What do the data structures buy?** | A flat tick-indexed array of levels plus an intrusive list over an object pool runs **1.66x to 2.60x** the throughput of the `std::map` + `std::list` baseline (dense book: **31.5 ns per operation**, 31.7M ops/s; p99.9 latency 209 to 167 ns). |
+| **Does the market maker reproduce the paper?** | Yes. With no book, the model matches Avellaneda and Stoikov (2008), Tables 1 to 3, e.g. inventory strategy at gamma = 0.1: profit 64.90 vs 65.0, std 6.54 vs 6.6. |
+| **Does inventory skew pay in the real book?** | Not in mean P&L. Over 1000 paired tapes it earns **256.4 less** than symmetric quoting (95% CI [-303.3, -209.4]) but with a P&L std of 173 vs 791 and no losing episodes (vs 3.1%): a risk trade, not an edge. |
+| **Where does it break?** | Its mid-marked inventory P&L (146.4) vanishes when marked at the fundamental (-3.0). It stops making money between 1.2 and 1.4 ticks per step of fundamental volatility, as crossing limit orders take a growing share of fills. |
+
+**Read this first.** All flow is synthetic and mostly uninformed, with no fees, competitors or latency beyond one step, so the market-making numbers are properties of a simulator, not trading results. Benchmarks come from one machine (Apple M5, Apple clang 21) with a 42 ns clock tick, and no profiler was used to confirm the cache and allocator explanations.
+
+**Build history:** the work was done in five stages, each tagged (`stage-1` core engine, `stage-2` data structures and benchmark harness, `stage-3` pybind11 bindings, `stage-4` market maker, `stage-5` write-up).
 
 ## Quick start
 
 Prerequisites: macOS with the Xcode command line tools (`xcode-select --install`),
 CMake 3.25 or newer, and Python 3 for the bindings. The first configure needs
 network access, because CMake fetches pinned versions of GoogleTest (v1.17.0)
-and pybind11 (v3.0.4). I have only built this on macOS with Apple clang. All
+and pybind11 (v3.0.4). I have only built this on macOS with Apple clang; CI builds and tests it on macOS on every push. All
 commands run from the repository root.
 
 ```sh

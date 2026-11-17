@@ -1,0 +1,35 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Release build and C++ tests
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j 3
+          ctest --test-dir build --output-on-failure
+
+      - name: Sanitizer build (ASan + UBSan) and C++ tests
+        run: |
+          cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DLOB_SANITIZE=ON -DLOB_BUILD_BENCH=OFF
+          cmake --build build-asan -j 3
+          ctest --test-dir build-asan --output-on-failure
+
+      - name: Python bindings and tests
+        run: |
+          python -m pip install -r requirements.txt
+          cmake -S . -B build -DLOB_BUILD_PYTHON=ON -DPython_EXECUTABLE="$(which python)"
+          cmake --build build -j 3
+          python -m pytest -q python/tests
