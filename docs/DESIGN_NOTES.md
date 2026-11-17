@@ -2,8 +2,8 @@
 
 One entry per non-obvious decision: what was chosen, what the alternatives were,
 and what the trade-off is. Entries are numbered so code comments can refer to
-them (`See DESIGN_NOTES #4`). Part A is a C++ primer for someone coming from
-Python and Java; Part B is the decisions.
+them (`See DESIGN_NOTES #4`). Each entry gives the choice,
+the alternatives considered and the trade-off.
 
 Entries #1 to #14 were written in stage 1, before anything was measured: where
 they say something is "slow" or "fast" it is a claim about complexity or memory
@@ -12,117 +12,7 @@ comes from a Release build run on this machine and is saved in `results/`.
 
 ---
 
-## Part A. C++ concepts used in stage 1 (for a Python/Java programmer)
-
-### A1. Values, references and copies
-
-In Java and Python a variable of class type is a reference to a heap object, and
-assignment copies the reference. In C++ a variable *is* the object, and
-assignment copies the whole object.
-
-```cpp
-Level  a = level_it->second;   // COPIES the level, including its entire list
-Level& b = level_it->second;   // b is another name for the same level; no copy
-```
-
-That is why the matching loop writes `Level& level = ...` and `Order& maker = ...`.
-Dropping the `&` would compile, run, and silently modify a temporary copy
-instead of the book.
-
-`const T&` means "a reference I promise not to modify through". It is the
-default way to pass anything bigger than a few machine words without copying it.
-
-### A2. RAII (Resource Acquisition Is Initialization)
-
-C++ has no garbage collector. Instead, every object has a *destructor* that runs
-automatically at a precisely defined moment: when a local variable goes out of
-scope, or when the object that owns it is destroyed. A class that acquires a
-resource (memory, a file, a lock) in its constructor and releases it in its
-destructor can never leak it. That pattern is RAII.
-
-`OrderBook` contains no `new`, no `delete` and no destructor of its own. Its
-members (`std::map`, `std::list`, `std::unordered_map`) each free their own
-memory in their destructors, and the compiler-generated `~OrderBook()` calls
-them in reverse order of declaration. The closest Java analogue is
-try-with-resources, and Python's is `with`, but in C++ it is the default for
-every object rather than something you opt into.
-
-### A3. Iterators and iterator invalidation
-
-An iterator is a generalised pointer to an element of a container. `begin()`
-points at the first element, `end()` points one past the last, and
-`it->first` / `it->second` read a map entry's key and value.
-
-The trap with no Java/Python equivalent: **modifying a container can invalidate
-iterators and references into it, and using an invalidated one is undefined
-behaviour**, not an exception. (Java throws `ConcurrentModificationException`;
-C++ may crash, corrupt memory, or appear to work.) The rules differ per container:
-
-| Container | Insert | Erase |
-|---|---|---|
-| `std::vector` | invalidates everything if it reallocates | invalidates the erased element and everything after it |
-| `std::deque` | invalidates all iterators | invalidates all iterators (unless erasing at an end) |
-| `std::list` | invalidates nothing | invalidates only the erased element |
-| `std::map` | invalidates nothing | invalidates only the erased element |
-| `std::unordered_map` | invalidates iterators if it rehashes (references to elements survive) | invalidates only the erased element |
-
-The whole baseline design rests on the `std::list` row: `index_` stores a list
-iterator for every resting order, and those iterators stay valid for as long as
-the order rests, no matter how many other orders are added or removed around it.
-
-Places in the code where invalidation is handled deliberately:
-
-- `match()`: `index_.erase(maker.id)` is called **before** `level.queue.pop_front()`,
-  because the pop destroys the `Order` that `maker` refers to.
-- `match()`: after `opposite.erase(cursor)`, neither `cursor` nor `level` is
-  touched again; the loop re-reads `best()`.
-- `cancel()`: `side` is copied out of the order before `remove_resting()` erases it.
-
-### A4. Move semantics
-
-Copying a `std::vector` duplicates its heap buffer. *Moving* it transfers
-ownership of the buffer to the new object and leaves the source empty, at the
-cost of copying three pointers. C++ moves automatically when the source is a
-temporary or a local variable being returned.
-
-In stage 1 this shows up in `depth()`, which builds a `std::vector<LevelView>`
-locally and returns it by value. That looks expensive to a C programmer but is
-not: the compiler either constructs the vector directly in the caller's storage
-(copy elision, also called NRVO) or moves it. No element is copied.
-
-Move semantics is also why `OrderBook` *deletes* its move operations; see #8.
-
-### A5. Templates versus Java generics
-
-Java generics are erased at runtime: one compiled `List` handles every element
-type through references. C++ templates are *instantiated*: the compiler
-generates a separate, fully specialised copy of the code for each type used.
-
-`match<Levels>()` is compiled twice per book type, once for the bid side and
-once for the ask side. Each copy calls that side's code directly, so it can be
-inlined; there is no virtual dispatch. The cost is larger binaries and the rule
-that a template's definition must be visible where it is used, which is why the
-engine is header-only from stage 2 on (see #15).
-
-### A6. `const` member functions
-
-`std::optional<Price> best_bid() const;` The trailing `const` promises the
-function does not modify the book. The compiler enforces it, and it is what lets
-a caller holding a `const OrderBook&` still ask read-only questions.
-
-### A7. Undefined behaviour and why the sanitizers matter
-
-Out-of-bounds access, use-after-free, dangling references and signed integer
-overflow are *undefined behaviour*: the standard places no requirement on what
-happens. The program might crash, or might pass every test and fail in
-production. The build has an option, `-DLOB_SANITIZE=ON`, that compiles with
-AddressSanitizer and UndefinedBehaviorSanitizer, which turn most of these into
-an immediate, explained crash. The tests are run both ways: sanitized Debug to
-prove correctness, Release to prove the optimised build behaves the same.
-
----
-
-## Part B. Decisions
+## Stage 1: the baseline engine
 
 ### #1. Prices are integer ticks (`int64_t`)
 
@@ -178,7 +68,7 @@ baseline, and the thing stage 2 measures against.
 
 Because the comparator is a template argument, the bid map and ask map are
 different types. The matching code is therefore a template over the map type
-(see A5) rather than two copy-pasted functions.
+rather than two copy-pasted functions.
 
 ### #4. Queue within a level: `std::list<Order>` (baseline)
 
@@ -195,9 +85,30 @@ different types. The matching code is therefore a template over the map type
 
 **Trade-off.** Matching needs FIFO at the front; cancel needs O(1) removal from
 anywhere; the cancel index needs handles that stay valid. `std::list` is the
-only standard container that gives all three (see the table in A3). The price
-is one heap allocation and one deallocation per order, and nodes scattered
-across the heap.
+only standard container that gives all three. The price is one heap
+allocation and one deallocation per order, and nodes scattered across the heap.
+
+Iterator invalidation by container, which is what rules out the alternatives:
+
+| Container | Insert | Erase |
+|---|---|---|
+| `std::vector` | invalidates everything if it reallocates | invalidates the erased element and everything after it |
+| `std::deque` | invalidates all iterators | invalidates all iterators (unless erasing at an end) |
+| `std::list` | invalidates nothing | invalidates only the erased element |
+| `std::map` | invalidates nothing | invalidates only the erased element |
+| `std::unordered_map` | invalidates iterators if it rehashes (references to elements survive) | invalidates only the erased element |
+
+The whole baseline design rests on the `std::list` row: `index_` stores a list
+iterator for every resting order, and those iterators stay valid for as long as
+the order rests, no matter how many other orders are added or removed around it.
+
+Places in the code where invalidation is handled deliberately:
+
+- `match()`: `index_.erase(maker.id)` is called **before** `level.queue.pop_front()`,
+  because the pop destroys the `Order` that `maker` refers to.
+- `match()`: after `opposite.erase(cursor)`, neither `cursor` nor `level` is
+  touched again; the loop re-reads `best()`.
+- `cancel()`: `side` is copied out of the order before `remove_resting()` erases it.
 
 Each `Level` also caches `total_qty`, the sum of its orders' remaining
 quantities. It costs one addition or subtraction on each change and makes

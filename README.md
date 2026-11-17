@@ -196,7 +196,7 @@ There are no virtual functions. Each level container exposes a cheap `Cursor`
 | [python/run_analysis.py](python/run_analysis.py) | runs every stage 4 experiment and writes `results/mm/` |
 | [python/tests/](python/tests/) | binding, simulator and analysis tests; [python/bench_bindings.py](python/bench_bindings.py) times the bindings |
 | [results/](results/) | saved outputs: `bench_stage2.txt` and `.csv`; `mm/` holds `report.txt`, `summary.json` and eight figures |
-| [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) | design rationale, entries #1 to #33, plus a C++ primer (A1 to A7) |
+| [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) | design rationale, entries #1 to #33 |
 
 ## Design decisions and trade-offs
 
@@ -541,25 +541,3 @@ Next steps, roughly in order:
    matching change to the reference book.
 7. C++20 concepts for the queue and level interfaces; package the bindings with
    `pyproject.toml` and scikit-build-core.
-
-## How to read this code
-
-For a reviewer with half an hour, in this order:
-
-1. [include/lob/types.hpp](include/lob/types.hpp): the vocabulary, 74 lines.
-2. [include/lob/order_book.hpp](include/lob/order_book.hpp): `submit()`, `match()`,
-   `rest()` and `cancel()`. The whole matching algorithm is `match()`, under 50 lines.
-3. [include/lob/price_levels.hpp](include/lob/price_levels.hpp) and
-   [include/lob/order_queue.hpp](include/lob/order_queue.hpp): the baseline and
-   optimised data structures side by side. `FlatLevels::erase` is the scan;
-   `OrderPool` is the pool.
-4. [tests/order_book_test.cpp](tests/order_book_test.cpp): the rules as
-   executable examples, then [tests/differential_test.cpp](tests/differential_test.cpp)
-   and [tests/reference_book.hpp](tests/reference_book.hpp).
-5. [bench/bench_main.cpp](bench/bench_main.cpp) with [results/bench_stage2.txt](results/bench_stage2.txt)
-   open next to it, then [bindings/pylob.cpp](bindings/pylob.cpp), which is short.
-6. [python/mm/market_maker.py](python/mm/market_maker.py) (`requote()`) and
-   [python/mm/simulate.py](python/mm/simulate.py), with
-   [results/mm/report.txt](results/mm/report.txt) open next to them.
-7. [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) for the reasoning behind any of
-   the above; code comments cite entries as `DESIGN_NOTES #n`.

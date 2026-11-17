@@ -128,7 +128,7 @@ public:
             out.reserve(std::min(max_levels, asks_.size()));
             asks_.for_each(max_levels, append);
         }
-        return out;   // moved or elided, not copied (DESIGN_NOTES A4)
+        return out;   // moved or elided, not copied
     }
 
     [[nodiscard]] std::size_t order_count() const { return index_.size(); }
@@ -249,7 +249,7 @@ private:
         level.total_qty += order.qty;
 
         // The handle stays valid until that order itself is removed, whatever
-        // else happens to the queue (DESIGN_NOTES A3).
+        // else happens to the queue (DESIGN_NOTES #4).
         const bool inserted = index_.emplace(order.id, handle).second;
         // assert() is checked in Debug builds and compiled out in Release
         // (when NDEBUG is defined), so it documents invariants at no cost.
