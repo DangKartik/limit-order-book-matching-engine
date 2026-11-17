@@ -45,8 +45,8 @@ The engine matches limit and market orders with cancels and partial fills. I wro
 Prerequisites: macOS with the Xcode command line tools (`xcode-select --install`),
 CMake 3.25 or newer, and Python 3 for the bindings. The first configure needs
 network access, because CMake fetches pinned versions of GoogleTest (v1.17.0)
-and pybind11 (v3.0.4). I have only built this on macOS with Apple clang; CI builds and tests it on macOS on every push. All
-commands run from the repository root.
+and pybind11 (v3.0.4). It is built and tested on macOS with Apple clang, locally
+and in CI on every push. All commands run from the repository root.
 
 ```sh
 # Release build (the default build type), tests, and the benchmark
